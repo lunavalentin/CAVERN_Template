@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAVERN</title>
+
+    <!-- Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://aframe.io https://cdnjs.cloudflare.com https://cdn.jsdelivr.net;
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://use.fontawesome.com;
+        font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://use.fontawesome.com data:;
+        img-src 'self' data: blob:;
+        connect-src 'self' ws: wss:;
+        worker-src 'self' blob:;
+    ">
+
+    <!-- A-Frame - Load async with error handling -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js" crossorigin="anonymous" async
+        onerror="console.error('Failed to load A-Frame')"></script>
+
+    <!-- p5.js (For Map) - Async loading -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js" async
+        onerror="console.error('Failed to load p5.js')"></script>
+
+    <!-- Preconnect for faster loading -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link rel="preconnect" href="https://aframe.io">
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+
+    <!-- Fonts & Icons -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600&family=Inter:wght@300;400;500&display=swap"
+        rel="stylesheet" onerror="console.warn('Failed to load Google Fonts')">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        onerror="console.warn('Failed to load Bootstrap CSS')">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+        onerror="console.warn('Failed to load Bootstrap Icons')">
+
+    <!-- JSAmbisonics - Load with error handling -->
+    <script src="./JSAmbisonics/ambisonics.umd.js" onerror="console.error('Failed to load JSAmbisonics')"></script>
+
+    <!-- App Scripts - Deferred for non-blocking load -->
+    <script src="./scripts/audio.js" defer onerror="console.error('Failed to load audio.js')"></script>
+    <script src="./scripts/map.js" defer onerror="console.error('Failed to load map.js')"></script>
+    <script src="./scripts/main.js" defer onerror="console.error('Failed to load main.js')"></script>
+
+    <style>
+        :root {
+            --glass-bg: rgba(20, 20, 20, 0.65);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --accent: #E0C097;
+            /* Archaeology-ish gold/beige */
+            --text-main: #FFFFFF;
+            --text-muted: #AAAAAA;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            /* Prevent scroll */
+        }
+
+        /* Ensure A-Frame scene is visible and full-screen */
+        a-scene {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+
+        /* Custom UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .pointer-events-auto {
+            pointer-events: auto;
+        }
+
+        /* Top Navigation Bar */
+        .top-bar {
+            background: var(--glass-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--glass-border);
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .app-title {
+            font-family: 'Archivo', sans-serif;
+            font-weight: 600;
+            font-size: 1.5rem;
+            color: var(--text-main);
+            margin: 0;
+            letter-spacing: 1px;
+        }
+
+        .nav-controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .location-display {
+            font-weight: 500;
+            color: var(--accent);
+            min-width: 200px;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-glass {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--glass-border);
+            color: var(--text-main);
+            border-radius: 8px;
+            padding: 8px 16px;
+            transition: all 0.2s ease;
+        }
+
+        .btn-glass:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+        }
+
+        .btn-glass:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .btn-glass.active {
+            background: rgba(224, 192, 151, 0.3);
+            /* Accent color transparent */
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        /* Right Sidebar */
+        .sidebar {
+            position: absolute;
+            top: 80px;
+            /* Below top bar */
+            right: 20px;
+            width: 340px;
+            max-height: calc(100% - 120px);
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            padding: 20px;
+            overflow-y: auto;
+            transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            transform: translateX(0);
+        }
+
+        .sidebar.collapsed {
+            transform: translateX(120%);
+            /* Move strictly off-screen */
+        }
+
+        /* Map Container */
+        #mapContainer {
+            width: 100%;
+            /* Fixed height or aspect ratio handled by p5, but let's give it a min-height */
+            min-height: 200px;
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            /* Placeholder bg */
+            transition: all 0.3s ease;
+        }
+
+        #mapContainer canvas {
+            width: 100% !important;
+            height: auto !important;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        /* Form Elements */
+        .form-label {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+
+        .form-select,
+        .form-control {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--glass-border);
+            color: var(--text-main);
+            border-radius: 8px;
+        }
+
+        .form-select:focus,
+        .form-control:focus {
+            background: rgba(0, 0, 0, 0.6);
+            color: var(--text-main);
+            box-shadow: 0 0 0 2px var(--accent);
+            border-color: transparent;
+        }
+
+        .section-title {
+            font-size: 0.9rem;
+            color: var(--accent);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding-bottom: 5px;
+            margin-bottom: 15px;
+            margin-top: 10px;
+        }
+
+        /* Volume Slider Styling */
+        .form-range {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            outline: none;
+        }
+
+        .form-range::-webkit-slider-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .form-range::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 8px var(--accent);
+        }
+
+        .form-range::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+        }
+
+        .form-range::-moz-range-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 8px var(--accent);
+        }
+
+        /* Floating Toggle for Sidebar */
+        #sidebar-toggle {
+            position: absolute;
+            top: 80px;
+            right: 20px;
+            z-index: 1001;
+            /* Above sidebar if collapsed */
+        }
+
+        /* Loading Overlay */
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            transition: opacity 0.5s ease;
+        }
+
+        #loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(224, 192, 151, 0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-text {
+            color: var(--text-main);
+            margin-top: 20px;
+            font-size: 1.1rem;
+            letter-spacing: 1px;
+        }
+
+        .progress-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            z-index: 2000;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--accent);
+            width: 0%;
+            transition: width 0.3s ease;
+            box-shadow: 0 0 10px var(--accent);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="progress-container" id="progress-container">
+        <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <!-- Loading Overlay -->
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading CAVERN...</div>
+    </div>
+
+    <!-- A-Frame Scene -->
+    <a-scene embedded loading-screen="dotsColor: white; backgroundColor: black">
+        <a-assets id="image-assets"></a-assets>
+
+        <!-- Fixed brightness: shader:flat and color:white ensures original image brightness -->
+        <a-sky id="sky" color="#FFFFFF" material="shader: flat;"></a-sky>
+        <a-sky id="sky-buffer" color="#FFFFFF" material="shader: flat;" visible="false"></a-sky>
+
+        <a-camera id="cameraVR" position="0 1.6 0" look-controls="reverseMouseDrag: true"></a-camera>
+    </a-scene>
+
+    <!-- UI Overlay -->
+    <div id="ui-layer">
+
+        <!-- Top Bar -->
+        <div class="top-bar pointer-events-auto">
+            <div class="d-flex align-items-center">
+                <h1 id="app-title" class="app-title me-3">CAVERN</h1>
+                <span id="app-subtitle" class="text-white-50 small d-none d-md-block">Chauvet Cave · Archaeoacoustics
+                    Research</span>
+            </div>
+
+            <div class="nav-controls">
+                <button id="btn-prev" class="btn-glass" title="Previous Location"><i
+                        class="bi bi-chevron-left"></i></button>
+                <div id="location-display" class="location-display">Loading...</div>
+                <button id="btn-next" class="btn-glass" title="Next Location"><i
+                        class="bi bi-chevron-right"></i></button>
+            </div>
+
+            <div class="d-flex gap-2">
+                <button id="btn-toggle-sidebar" class="btn-glass active" title="Toggle Controls"><i
+                        class="bi bi-layout-sidebar-reverse"></i></button>
+                <a id="btn-about" href="#" target="_blank" class="btn-glass text-decoration-none" title="About"><i
+                        class="bi bi-info-circle"></i></a>
+            </div>
+        </div>
+
+        <!-- Right Sidebar (Settings & Map) -->
+        <div id="sidebar" class="sidebar pointer-events-auto">
+
+            <div class="section-title">Navigation Map</div>
+            <div id="mapContainer"></div>
+
+            <div class="section-title">Location Settings</div>
+            <div class="mb-3">
+                <label for="location-select" class="form-label">Location</label>
+                <select id="location-select" class="form-select"></select>
+            </div>
+            <div class="mb-3">
+                <label for="distance-select" class="form-label">Distance</label>
+                <select id="distance-select" class="form-select"></select>
+            </div>
+
+            <div class="section-title">Audio Source</div>
+            <div class="btn-group w-100 mb-3" role="group">
+                <input type="radio" class="btn-check" name="source-type" id="src-sample" autocomplete="off" checked>
+                <label class="btn btn-outline-light btn-sm" for="src-sample">Sample</label>
+
+                <input type="radio" class="btn-check" name="source-type" id="src-mic" autocomplete="off">
+                <label class="btn btn-outline-light btn-sm" for="src-mic">Mic</label>
+
+                <input type="radio" class="btn-check" name="source-type" id="src-upload" autocomplete="off">
+                <label class="btn btn-outline-light btn-sm" for="src-upload">Upload</label>
+            </div>
+
+            <div id="ctrl-sample" class="mb-3">
+                <select id="sample-select" class="form-select"></select>
+            </div>
+
+            <div id="ctrl-upload" class="mb-3 hide" style="display:none;">
+                <input class="form-control" type="file" id="file-upload" accept=".wav,.mp3,.ogg,.aiff">
+            </div>
+
+            <div class="d-grid gap-2 mb-3">
+                <button id="btn-play" class="btn btn-success"><i class="bi bi-play-fill me-1"></i> Start Audio</button>
+                <button id="btn-stop" class="btn btn-danger" disabled><i class="bi bi-stop-fill me-1"></i> Stop</button>
+            </div>
+
+            <div class="mb-3">
+                <label for="volume-slider" class="form-label d-flex justify-content-between align-items-center">
+                    <span>Volume</span>
+                    <span id="volume-value" class="text-white-50 small">100%</span>
+                </label>
+                <input type="range" class="form-range" id="volume-slider" min="0" max="100" value="100">
+            </div>
+
+            <div class="form-check form-switch d-flex align-items-center justify-content-between text-white-50">
+                <label class="form-check-label" for="toggle-wet">Ambisonic Mode (Wet)</label>
+                <input class="form-check-input ms-2" type="checkbox" id="toggle-wet" checked>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+
+</html>

@@ -1,0 +1,28 @@
+{
+    "project": {
+        "name": "New Project",
+        "title": "CAVERN",
+        "subtitle": "Project Subtitle",
+        "aboutUrl": "#"
+    },
+    "map": {
+        "imagePath": "assets/plotting_website.svg",
+        "bounds": {
+            "xmin": 0,
+            "xmax": 100,
+            "ymin": 0,
+            "ymax": 100
+        }
+    },
+    "data": {
+        "csvPath": "DataSet.csv",
+        "imagesPath": "assets/images/",
+        "irsPath": "assets/irs/",
+        "audioPath": "assets/audio/"
+    },
+    "audio": {
+        "ambisonicOrder": 1,
+        "defaultVolume": 100,
+        "samples": []
+    }
+}
