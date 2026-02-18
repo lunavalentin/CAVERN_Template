@@ -1,11 +1,11 @@
 
-# CAVERN Template 洞穴
+# CAVERN Template
 
 This is a ready-to-use template for creating your own **Virtual Acoustics Tour**. It lets you build an interactive web experience where users can explore a map, view 360° images, and listen to spatialized audio at different locations.
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 1. **Download or copy the template folder.**
 2. **Add your own files:**
@@ -21,7 +21,7 @@ This is a ready-to-use template for creating your own **Virtual Acoustics Tour**
 
 ---
 
-## 📁 Folder Structure
+## Folder Structure
 
 * `index.html` — The main webpage.
 * `config.json` — Project settings (title, map, audio, etc.).
@@ -33,7 +33,7 @@ This is a ready-to-use template for creating your own **Virtual Acoustics Tour**
 
 ---
 
-## 🛠️ Project Configuration (`config.json`)
+## Project Configuration (`config.json`)
 
 Open `config.json` in a text editor. Here’s what each section means:
 
@@ -44,7 +44,7 @@ Open `config.json` in a text editor. Here’s what each section means:
 
 ---
 
-## 📊 Location Data (`DataSet.csv`)
+## Location Data (`DataSet.csv`)
 
 Open `DataSet.csv` in Excel or a text editor. Each row is a location (spot) on your map.
 
@@ -65,7 +65,7 @@ Repeat for `_2`, `_3`, etc. to add more IRs.
 
 ---
 
-## 📂 Assets
+## Assets
 
 Put your files in the correct folders:
 
@@ -76,7 +76,7 @@ Put your files in the correct folders:
 
 ---
 
-## 🗺️ Map Bounds
+## Map Bounds
 
 To make the dots appear in the right place:
 1. Find the real-world coordinates for the left, right, top, and bottom edges of your map.
@@ -84,7 +84,7 @@ To make the dots appear in the right place:
 
 ---
 
-## 🎨 Customization
+## Customization
 
 * **UI Text:** Edit `config.json` for project name, labels, etc.
 * **Colors/Style:** Edit the `<style>` block in `index.html` for colors and layout.
@@ -92,7 +92,7 @@ To make the dots appear in the right place:
 
 ---
 
-## 🧑‍💻 Advanced Features
+## Advanced Features
 
 * **Offline Support:** The `sw.js` file enables offline access.
 * **Spatial Audio:** Uses Ambisonics for immersive sound. Make sure your IRs are in AmbiX format.
@@ -100,7 +100,7 @@ To make the dots appear in the right place:
 
 ---
 
-## 🆘 Troubleshooting
+## Troubleshooting
 
 * If images or audio don’t load, check the file paths in `config.json` and `DataSet.csv`.
 * If dots don’t appear on the map, check your coordinates and map bounds.
@@ -108,7 +108,7 @@ To make the dots appear in the right place:
 
 ---
 
-## 👩‍🎤 Credits & License
+## Credits & License
 
 Created by Luna Leila Valentin & Celeste Betancur Gutierrez.
 
