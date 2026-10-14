@@ -24,6 +24,22 @@ let ymin = 6366452.372;
 let ymax = 6366688.656;
 let w, h;
 
+// Map bounds come from config.json (map.bounds). The values above are only used until
+// window.config is available. The canvas aspect ratio (height / width) follows the bounds.
+function applyConfigBounds() {
+    const b = window.config && window.config.map && window.config.map.bounds;
+    if (!b) return;
+    const v = [b.xmin, b.xmax, b.ymin, b.ymax].map(Number);
+    if (v.every(Number.isFinite) && v[1] > v[0] && v[3] > v[2]) {
+        xmin = v[0]; xmax = v[1]; ymin = v[2]; ymax = v[3];
+    }
+}
+
+function mapAspect() {
+    applyConfigBounds();
+    return (ymax - ymin) / (xmax - xmin);
+}
+
 var mouseToLocation = '';
 let newLocation = '';
 
@@ -68,7 +84,7 @@ function setup() {
     } else {
         w = 300; // Fallback
     }
-    h = w * 2.2175; // aspect ratio
+    h = w * mapAspect(); // aspect ratio from the map bounds
     canvas = createCanvas(w, h);
     canvas.parent("mapContainer");
 
@@ -83,7 +99,8 @@ function draw() {
     // Or just rely on sidebar transitions triggering explicit resize calls.
     // For now, let's just ensure it matches container width
     let container = document.getElementById("mapContainer");
-    if (container && Math.abs(container.clientWidth - w) > 1) {
+    // Also resize when the bounds (and so the aspect ratio) arrive after setup()
+    if (container && (Math.abs(container.clientWidth - w) > 1 || Math.abs(container.clientWidth * mapAspect() - h) > 1)) {
         resizeMapCanvas();
     }
 
@@ -175,8 +192,8 @@ function resizeMapCanvas() {
     let container = document.getElementById("mapContainer");
     if (container) {
         w = container.clientWidth;
-        // Keep aspect ratio
-        h = w * 2.2175;
+        // Keep aspect ratio (from the map bounds)
+        h = w * mapAspect();
         resizeCanvas(w, h, true); // true = no redraw immediatly
     }
 }
