@@ -797,8 +797,10 @@ function animate() {
         const z = THREE.MathUtils.radToDeg(obj.rotation.z);
 
         // Update Ambisonic Rotator
-        // Invert Y (Yaw) to match typical coordinate system expectations
-        audio.updateRotation(-y, x, z);
+        // Turn the sound field with the picture. Yaw is passed as it is: inverting it turned the
+        // field against the view. Pitch and roll are inverted: three.js pitches about +X (right)
+        // and rolls about +Z (back), JSAmbisonics pitches about +Y (left) and rolls about +X (front).
+        audio.updateRotation(y, -x, -z);
     }
 }
 
