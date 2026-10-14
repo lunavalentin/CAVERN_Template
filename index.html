@@ -17,8 +17,8 @@
         worker-src 'self' blob:;
     ">
 
-    <!-- A-Frame - Load async with error handling -->
-    <script src="https://aframe.io/releases/1.4.2/aframe.min.js" crossorigin="anonymous" async
+    <!-- A-Frame - Load without async (with error handling): an async load can run after <a-scene> is parsed and fail -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js" crossorigin="anonymous"
         onerror="console.error('Failed to load A-Frame')"></script>
 
     <!-- p5.js (For Map) - Async loading -->
