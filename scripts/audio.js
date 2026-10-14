@@ -303,14 +303,43 @@ class AudioEngine {
         }
 
         // Ambisonic Convolver
-        // We convolve a Mono source with a 4-channel IR.
-        // Web Audio ConvolverNode: mono input + 4-ch buffer -> 4-ch output.
-        this.convolverNode = this.ctx.createConvolver();
-        this.convolverNode.normalize = false;
-        this.convolverNode.buffer = this.currentIrBuffer;
+        // We convolve a Mono source with each channel of the N-channel IR separately (one mono
+        // ConvolverNode per channel) and merge the results back into N channels for the rotator.
+        // A single ConvolverNode with a 4-channel buffer is Web Audio "true stereo" (2-channel
+        // output), which does not carry the ambisonic field.
+        if (this.foaConvolvers) {
+            this.foaConvolvers.forEach(c => c.disconnect());
+            this.foaConvolvers = null;
+        }
+        if (this.foaOut) {
+            this.foaOut.disconnect();
+            this.foaOut = null;
+        }
+        const ir = this.currentIrBuffer;
+        const nCh = ir.numberOfChannels;
+        this.convolverNode = this.ctx.createGain();
+        this.convolverNode.channelCount = 1;
+        this.convolverNode.channelCountMode = 'explicit';
+        this.convolverNode.channelInterpretation = 'speakers';
+        this.foaOut = this.ctx.createChannelMerger(nCh);
+        this.foaConvolvers = [];
+        for (let c = 0; c < nCh; c++) {
+            const mono = this.ctx.createBuffer(1, ir.length, ir.sampleRate);
+            mono.getChannelData(0).set(ir.getChannelData(c));
+            const conv = this.ctx.createConvolver();
+            conv.normalize = false;
+            conv.buffer = mono;
+            this.convolverNode.connect(conv);
+            conv.connect(this.foaOut, 0, c);
+            this.foaConvolvers.push(conv);
+        }
 
         // Connect to Rotator (Input of Wet Chain)
-        this.convolverNode.connect(this.rotator.in);
+        this.foaOut.connect(this.rotator.in);
+        // A source that is already playing is moved to the new input
+        if (this.sourceNode) {
+            this.sourceNode.connect(this.convolverNode);
+        }
         console.log(`🔊 Convolver setup complete (IR channels: ${this.currentIrBuffer.numberOfChannels})`);
     }
 
