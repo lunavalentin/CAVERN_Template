@@ -80,8 +80,11 @@ class AudioEngine {
         this.dryGainNode = this.ctx.createGain();
         this.wetGainNode = this.ctx.createGain();
 
-        // Initial state
-        this.updateDryWet();
+        // Initial state, set directly before any source connects: a ramp from a new GainNode's
+        // value 1 let the unconvolved source through on the first wet Start
+        const initialGains = this.dryWetTargets();
+        this.wetGainNode.gain.value = initialGains.wet;
+        this.dryGainNode.gain.value = initialGains.dry;
 
         // Connect Wet Path End
         // Rotator -> Decoder -> WetGain -> MasterGain
@@ -101,17 +104,33 @@ class AudioEngine {
     }
 
     updateDryWet() {
-        if (!this.ctx) return;
+        if (!this.ctx || !this.wetGainNode || !this.dryGainNode) return;
         const rampTime = 0.1;
         const t = this.ctx.currentTime;
+        const g = this.dryWetTargets();
 
-        if (this.isWet) {
-            this.wetGainNode.gain.setTargetAtTime(1.0, t, rampTime);
-            this.dryGainNode.gain.setTargetAtTime(0.0, t, rampTime);
-        } else {
-            this.wetGainNode.gain.setTargetAtTime(0.0, t, rampTime);
-            this.dryGainNode.gain.setTargetAtTime(1.0, t, rampTime);
+        // Smoothed only while a source plays in a running context; otherwise nothing is audible and
+        // the requested state is set at once (an idle GainNode does not advance a ramp, which would
+        // then start only with the next source and let the dry path through)
+        if (this.ctx.state !== 'running' || !this.isPlaying) {
+            this.setDryWetNow(g);
+            return;
         }
+        this.wetGainNode.gain.setTargetAtTime(g.wet, t, rampTime);
+        this.dryGainNode.gain.setTargetAtTime(g.dry, t, rampTime);
+    }
+
+    // Set both gains to the requested state at once, dropping any scheduled ramp
+    setDryWetNow(g) {
+        [[this.wetGainNode, g.wet], [this.dryGainNode, g.dry]].forEach(([node, v]) => {
+            node.gain.cancelScheduledValues(0);
+            node.gain.value = v;
+        });
+    }
+
+    // Requested gains: Ambisonic Mode on = wet 1, dry 0; off = wet 0, dry 1
+    dryWetTargets() {
+        return this.isWet ? { wet: 1.0, dry: 0.0 } : { wet: 0.0, dry: 1.0 };
     }
 
     setVolume(value) {
@@ -274,6 +293,10 @@ class AudioEngine {
     }
 
     connectSourceGraph() {
+        // A new source (called only after stopSource) starts at the requested gains: a ramp left
+        // from an idle toggle or interrupted by Stop must not shape its first frames
+        if (this.wetGainNode && this.dryGainNode) this.setDryWetNow(this.dryWetTargets());
+
         // Disconnect old nodes if any
         if (this.convolverNode) {
             this.convolverNode.disconnect();
