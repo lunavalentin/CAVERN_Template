@@ -195,11 +195,11 @@ async function loadConfig() {
         console.error('Failed to load config.json, using defaults:', e);
         // Fallback to default config
         config = {
-            project: {
-                name: "Chauvet Cave",
+            project: { // neutral fallback: no other project's name, subtitle or About page
+                name: "Virtual acoustics tour",
                 title: "CAVERN",
-                subtitle: "Chauvet Cave · Archaeoacoustics Research",
-                aboutUrl: "https://ccrma.stanford.edu/chauvet/"
+                subtitle: "",
+                aboutUrl: "#"
             },
             map: {
                 imagePath: "assets/plotting_website.svg",
