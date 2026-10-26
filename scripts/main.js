@@ -1273,12 +1273,16 @@ function animate() {
 
 function registerServiceWorker() {
     if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
+        const register = () => {
             navigator.serviceWorker.register('./sw.js').then(registration => {
                 console.log('SW registered: ', registration);
             }).catch(registrationError => {
                 console.log('SW registration failed: ', registrationError);
             });
-        });
+        };
+        // This runs after the asynchronous first-location load, often after the window 'load'
+        // event: register at once then, else once on 'load'
+        if (document.readyState === 'complete') register();
+        else window.addEventListener('load', register, { once: true });
     }
 }
