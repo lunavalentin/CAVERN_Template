@@ -364,7 +364,8 @@
         <a-sky id="sky" color="#FFFFFF" material="shader: flat;"></a-sky>
         <a-sky id="sky-buffer" color="#FFFFFF" material="shader: flat;" visible="false"></a-sky>
 
-        <a-camera id="cameraVR" position="0 1.6 0" look-controls="reverseMouseDrag: true"></a-camera>
+        <!-- wasd-controls off: in a 360-degree picture the keys must not move the camera inside the sphere -->
+        <a-camera id="cameraVR" position="0 1.6 0" look-controls="reverseMouseDrag: true" wasd-controls="enabled: false"></a-camera>
     </a-scene>
 
     <!-- UI Overlay -->
