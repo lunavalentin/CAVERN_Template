@@ -266,12 +266,19 @@ class AudioEngine {
         console.log(`🎵 Playing sample: ${url}`);
 
         try {
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // Decoded samples are cached per URL: no new download and decode on every Start
+            if (!this.sampleCache) this.sampleCache = new Map();
+            if (this.sampleCache.has(url)) {
+                this.currentAudioBuffer = this.sampleCache.get(url);
+            } else {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                this.currentAudioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+                this.sampleCache.set(url, this.currentAudioBuffer);
             }
-            const arrayBuffer = await response.arrayBuffer();
-            this.currentAudioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
 
             this.playBuffer(this.currentAudioBuffer);
             console.log(`✅ Sample playing: ${url.split('/').pop()}`);
