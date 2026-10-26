@@ -27,12 +27,76 @@ class AudioEngine {
         this.irCache = new Map(); // Stores decoded AudioBuffers: url -> AudioBuffer
     }
 
-    async init() {
+    // One engine creation at a time: a call made while the engine is being made gets that same
+    // attempt (one library load, one AudioContext) and its result; once it has settled, the next call
+    // starts again (a failed start is tried again). Once the engine exists, every call asks a
+    // suspended context to run itself and returns at once: no call waits for a resume(), which the
+    // browser may keep pending (WebKit, without a user gesture); playback waits in whenRunning()
+    init() {
+        if (this.ctx && !this.initRun) return this.startEngine();
+        if (!this.initRun) this.initRun = this.startEngine().finally(() => { this.initRun = null; });
+        return this.initRun;
+    }
+
+    // Called synchronously by the Start button's press, before anything is awaited: makes the
+    // AudioContext if there is none yet (startEngine completes the engine with it) and asks a
+    // suspended one to run, so the press's user gesture is used also when the library is still
+    // loading or arrives later (WebKit lets a context run only after a resume() in a gesture).
+    prime() {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!this.ctx && !this.newCtx && AudioContext) this.newCtx = new AudioContext();
+        const ctx = this.ctx || this.newCtx;
+        if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => { });
+    }
+
+    // Playback starts only in a running context. A context made or resumed in a press runs shortly
+    // after it; one that stays suspended (WebKit, for a context made or resumed outside a user
+    // gesture, or a resume() that never settles) is not waited for longer than 3 s: the Start then
+    // fails with an AudioSuspendedError, which main.js shows below the Start/Stop buttons with
+    // Start enabled again (the next press asks the context to run again, prime). Returns false
+    // when the Start is or went stale: a newer Start, Stop, a location or distance change or a
+    // failed response ends the wait at once (endStartWaits), and the caller then releases what it
+    // holds (a microphone stream) in the same task. A true result holds only when it is returned:
+    // a Stop, a source change or a newer Start may run before the caller resumes, so each caller
+    // checks its own generation again right after its await, before it uses anything.
+    async whenRunning(startGen) {
+        if (startGen !== this.startGeneration) return false;
+        const ctx = this.ctx;
+        if (ctx.state !== 'running') {
+            if (!this.startWaits) this.startWaits = new Set();
+            await new Promise(resolve => {
+                const done = () => {
+                    ctx.removeEventListener('statechange', onState);
+                    clearTimeout(timer);
+                    this.startWaits.delete(done);
+                    resolve();
+                };
+                const onState = () => { if (ctx.state === 'running') done(); };
+                ctx.addEventListener('statechange', onState);
+                const timer = setTimeout(done, 3000);
+                this.startWaits.add(done);
+            });
+        }
+        if (startGen !== this.startGeneration) return false;
+        if (ctx.state === 'running') return true;
+        const err = new Error('The browser has not let the sound start yet. Press Start Audio to play.');
+        err.name = 'AudioSuspendedError';
+        throw err;
+    }
+
+    // Ends every readiness wait at once (beginStart, cancelStart: each makes every waiting Start
+    // stale), so each waiting Start returns false and releases what it holds
+    endStartWaits() {
+        if (this.startWaits) [...this.startWaits].forEach(done => done());
+    }
+
+    async startEngine() {
         if (this.ctx) {
+            // asked to run, not waited for: a resume() that the browser keeps pending (WebKit,
+            // outside a user gesture) or that never settles must not hold the Start
             if (this.ctx.state === 'suspended') {
                 console.log('🔇 AudioContext suspended, resuming...');
-                await this.ctx.resume();
-                console.log(`▶️ AudioContext resumed. State: ${this.ctx.state}`);
+                this.ctx.resume().catch(() => { });
             }
             return;
         }
@@ -42,12 +106,24 @@ class AudioEngine {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (!AudioContext) {
             console.error('❌ Web Audio API not supported in this browser!');
-            alert('Your browser does not support Web Audio API. Please use a modern browser.');
-            return;
+            throw this.engineError('this browser has no Web Audio API');
         }
 
-        this.ctx = new AudioContext();
-        console.log(`🔊 AudioContext created. State: ${this.ctx.state}`);
+        // The AudioContext is made before JSAmbisonics loads, or is the one a Start's press made and
+        // resumed (prime). Until the engine is complete it is this.newCtx, not this.ctx (nothing
+        // connects to it before its rotator and decoder exist); a failure closes it and leaves the
+        // engine as before init, and the next Start makes a new one. A constructor that throws is the
+        // engine's failure as well, so also the response request at page load names the engine
+        if (!this.newCtx) {
+            try {
+                this.newCtx = new AudioContext();
+            } catch (e) {
+                console.error('❌ AudioContext could not be made:', e);
+                throw this.engineError(`the browser could not make an AudioContext: ${(e && e.name) || 'Error'}`);
+            }
+        }
+        const ctx = this.newCtx;
+        console.log(`🔊 AudioContext created. State: ${ctx.state}`);
 
         // Initialize JSAmbisonics
         if (typeof ambisonics === 'undefined') {
@@ -56,10 +132,13 @@ class AudioEngine {
                 await this.loadScript('./JSAmbisonics/ambisonics.umd.js');
             } catch (e) {
                 console.error("❌ Failed to load JSAmbisonics:", e);
-                alert('Audio library failed to load. Please check internet connection or file paths.');
-                return;
+                if (this.newCtx === ctx) this.newCtx = null;
+                ctx.close().catch(() => { });
+                throw this.engineError('the audio library JSAmbisonics could not be loaded');
             }
         }
+        this.newCtx = null;
+        this.ctx = ctx;
 
         try {
             this.rotator = new ambisonics.sceneRotator(this.ctx, this.order);
@@ -67,8 +146,11 @@ class AudioEngine {
             console.log('✅ JSAmbisonics initialized (Order:', this.order, ')');
         } catch (e) {
             console.error('❌ Failed to initialize JSAmbisonics:', e);
-            alert('Audio processing initialization failed. Please refresh.');
-            return;
+            this.ctx.close().catch(() => { });
+            this.ctx = null;
+            this.rotator = null;
+            this.decoder = null;
+            throw this.engineError('the ambisonic rotator or decoder could not be made');
         }
 
         // Output Gain
@@ -186,7 +268,9 @@ class AudioEngine {
     // never kept under the new label.
     async loadIR(url, rotationDegrees) {
         const gen = this.irGeneration = (this.irGeneration || 0) + 1;
-        if (!this.ctx) await this.init();
+        // a rejected initialization fails this request only while it is the newest: an obsolete
+        // request's rejection changes nothing, as after its other waits
+        if (!this.ctx) await this.init().catch((e) => { if (gen === this.irGeneration) throw e; });
         if (gen !== this.irGeneration) return false;
         if (!url) return this.failIR(url, new Error('no impulse response for this location and distance'));
 
@@ -228,6 +312,7 @@ class AudioEngine {
     // A failed IR load: stop playback, drop the previous response and its rotation, and throw an
     // error that names the file (main.js shows a message near the controls).
     failIR(url, cause) {
+        this.cancelStart(); // a Start in flight is cancelled too: its source never connects
         this.stopSource();
         this.teardownConvolver();
         this.currentIrBuffer = null;
@@ -258,6 +343,28 @@ class AudioEngine {
         }
     }
 
+    // Start request generation. playSample, playFile and startMic each begin one; stop() and a
+    // failed response cancel it. A Start whose generation is no longer the newest is stale: it never
+    // connects its source. Both end every readiness wait at once (endStartWaits), so a stale Start
+    // releases what it holds without waiting.
+    beginStart() {
+        this.startGeneration = (this.startGeneration || 0) + 1;
+        this.endStartWaits();
+        return this.startGeneration;
+    }
+
+    cancelStart() {
+        this.startGeneration = (this.startGeneration || 0) + 1;
+        this.endStartWaits();
+    }
+
+    // A source connects only with the response of the newest IR request
+    irReadyForStart() {
+        const ok = !!this.currentIrBuffer && this.irAppliedGeneration === this.irGeneration;
+        if (!ok) console.warn('⚠️ Start not connected: the response of the current location and distance is not loaded');
+        return ok;
+    }
+
     async preloadIR(url) {
         if (!this.ctx) await this.init();
         if (!url || this.irCache.has(url)) return;
@@ -277,68 +384,178 @@ class AudioEngine {
     }
 
     async playSample(url) {
+        // This Start's own generation (beginStart). It is checked right after each wait, before
+        // anything is used, except that a sample's download and decoding run to their end first and
+        // fill the per-URL cache (only this Start's local buffer holds the result). A stale Start
+        // (a newer Start, Stop, a location or distance change, a failed response) returns false
+        // without touching the playing source or connecting its own. Returns true once playing.
+        const startGen = this.beginStart();
         if (!this.ctx) await this.init();
-
-        // Ensure context is running (it might be suspended if play was auto-triggered inside code)
-        if (this.ctx.state === 'suspended') await this.ctx.resume();
+        if (startGen !== this.startGeneration) return false;
 
         this.stopSource(); // Stop previous source
 
         console.log(`🎵 Playing sample: ${url}`);
 
+        // The sample stays this Start's own (buffer) until it plays: the download of a Start that
+        // went stale meanwhile fills the cache, never currentAudioBuffer
+        let buffer;
         try {
             // Decoded samples are cached per URL: no new download and decode on every Start
             if (!this.sampleCache) this.sampleCache = new Map();
             if (this.sampleCache.has(url)) {
-                this.currentAudioBuffer = this.sampleCache.get(url);
+                buffer = this.sampleCache.get(url);
             } else {
                 const response = await fetch(url);
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 const arrayBuffer = await response.arrayBuffer();
-                this.currentAudioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
-                this.sampleCache.set(url, this.currentAudioBuffer);
+                buffer = await this.ctx.decodeAudioData(arrayBuffer);
+                this.sampleCache.set(url, buffer);
             }
-
-            this.playBuffer(this.currentAudioBuffer);
-            console.log(`✅ Sample playing: ${url.split('/').pop()}`);
         } catch (e) {
+            // No alert(): a stale Start's failure changes nothing; otherwise main.js shows the cause
+            // below the Start/Stop buttons. Only the download and the decoding are in this try, so
+            // an error of the audio graph is never reported as a sample that could not be loaded.
+            if (startGen !== this.startGeneration) return false;
             console.error(`❌ Failed to play sample from ${url}:`, e);
-            alert(`Failed to load audio file: ${url.split('/').pop()}. Check console for details.`);
+            const err = new Error(`Sample not loaded: ${url.split('/').pop()} (${e && e.message ? e.message : e})`);
+            err.name = 'SampleLoadError';
+            err.sampleName = url.split('/').pop();
+            throw err;
         }
+
+        // The sample may have arrived after the Start went stale: never connect it
+        if (startGen !== this.startGeneration) {
+            console.log(`↩️ Start superseded, sample not connected: ${url.split('/').pop()}`);
+            return false;
+        }
+        // Playback is due: only in a running context, never waiting for a resume() that only a
+        // user gesture could complete (whenRunning). The generation is checked again right after
+        // this wait (also when it rejects): a Stop, a source change or a newer Start that ran after
+        // whenRunning() returned makes this Start stale too, and its buffer is never connected
+        let running;
+        try {
+            running = await this.whenRunning(startGen);
+        } catch (e) {
+            if (startGen !== this.startGeneration) return false; // stale: no message
+            throw e;
+        }
+        if (!running || startGen !== this.startGeneration) return false;
+        if (!this.irReadyForStart()) return false;
+        this.currentAudioBuffer = buffer;
+        this.playBuffer(buffer);
+        console.log(`✅ Sample playing: ${url.split('/').pop()}`);
+        return true;
     }
 
+    // An uploaded file: same Start generation rule as playSample; resolves true once the source
+    // plays, false when the Start went stale; a file that cannot be read or decoded throws
+    // 'SampleLoadError' (no alert)
     async playFile(fileBlob) {
+        const startGen = this.beginStart();
         if (!this.ctx) await this.init();
+        if (startGen !== this.startGeneration) return false;
         this.stopSource();
 
-        const fileReader = new FileReader();
-        fileReader.onload = async (e) => {
-            const arrayBuffer = e.target.result;
-            this.currentAudioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
-            this.playBuffer(this.currentAudioBuffer);
-        };
-        fileReader.readAsArrayBuffer(fileBlob);
+        let buffer;
+        try {
+            buffer = await this.ctx.decodeAudioData(await fileBlob.arrayBuffer());
+        } catch (e) {
+            if (startGen !== this.startGeneration) return false;
+            const name = fileBlob && fileBlob.name ? fileBlob.name : 'file';
+            const err = new Error(`File not decoded: ${name} (${e && e.message ? e.message : e})`);
+            err.name = 'SampleLoadError';
+            err.sampleName = name;
+            throw err;
+        }
+        // checked first after the reading and decoding (they run to their end first and only make
+        // this local buffer): a stale Start's file is never used
+        if (startGen !== this.startGeneration) return false;
+        // and again right after the wait for a running context, as in playSample
+        let running;
+        try {
+            running = await this.whenRunning(startGen);
+        } catch (e) {
+            if (startGen !== this.startGeneration) return false; // stale: no message
+            throw e;
+        }
+        if (!running || startGen !== this.startGeneration || !this.irReadyForStart()) return false;
+        this.currentAudioBuffer = buffer;
+        this.playBuffer(this.currentAudioBuffer);
+        return true;
     }
 
     async startMic() {
+        const startGen = this.beginStart(); // see playSample
         if (!this.ctx) await this.init();
+        if (startGen !== this.startGeneration) return false;
         this.stopSource();
 
         console.log('🎤 Requesting microphone access...');
 
+        // Only the microphone request fails as a microphone error: its cause is named in an error
+        // that main.js shows below the Start/Stop buttons (no alert), and main.js resets the Start
+        // button. The audio graph is connected after the request; an error there releases the
+        // stream and is reported as what it is.
+        let stream;
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (e) {
+            if (startGen !== this.startGeneration) return false; // stale: no message
+            const noDevice = e && (e.name === 'NotFoundError' || e.name === 'OverconstrainedError');
+            const refused = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+            console.error(noDevice ? "❌ No microphone found:" : refused ? "❌ Microphone access denied:"
+                : "❌ Microphone not available:", e);
+            const err = new Error(`${this.micFailureReason(e)} Nothing is playing.`);
+            err.name = 'MicStartError';
+            err.cause = e;
+            throw err;
+        }
+        // Checked first once access is granted: a Start that went stale while access was asked for
+        // releases this stream at once and never connects it (no orphan microphone stream)
+        if (startGen !== this.startGeneration) {
+            stream.getTracks().forEach(track => track.stop());
+            return false;
+        }
+        // Then the stream waits for a running context (whenRunning). It stays this Start's own: a
+        // newer Start, Stop or a location or distance change ends the wait at once and the stream is
+        // released in the same task, as when the context does not run within 3 s; it is never
+        // connected then. The generation is checked again right after this wait, before the stream
+        // is used: a Stop, a source change or a newer Start that ran after whenRunning() returned
+        // releases the stream too
+        let running;
+        try {
+            running = await this.whenRunning(startGen);
+        } catch (e) {
+            stream.getTracks().forEach(track => track.stop());
+            if (startGen !== this.startGeneration) return false; // stale: no message
+            throw e;
+        }
+        if (!running || startGen !== this.startGeneration || !this.irReadyForStart()) {
+            stream.getTracks().forEach(track => track.stop());
+            return false;
+        }
+        try {
             this.micStream = stream;
             this.sourceNode = this.ctx.createMediaStreamSource(stream);
 
             this.connectSourceGraph();
             this.isPlaying = true;
             console.log("✅ Microphone started");
+            return true;
         } catch (e) {
-            console.error("❌ Microphone access denied:", e);
-            alert('Microphone access denied. Please allow microphone access and try again.');
+            // Access was granted but the sound could not be connected: stop every track of the
+            // stream and disconnect the source (stopSource), then say what failed
+            console.error("❌ Microphone sound could not be connected:", e);
+            stream.getTracks().forEach(track => track.stop());
+            this.stopSource();
+            const err = new Error('The microphone\'s sound could not be connected to the audio processing ' +
+                `(${e && e.name ? e.name : 'Error'}), so nothing is playing; the microphone was released.`);
+            err.name = 'MicStartError';
+            err.cause = e;
+            throw err;
         }
     }
 
@@ -452,7 +669,34 @@ class AudioEngine {
     }
 
     stop() {
+        this.cancelStart(); // a Start in flight is cancelled too: its source never connects
         this.stopSource();
+    }
+
+    // An error of the audio engine itself (no Web Audio, JSAmbisonics missing or failing), thrown
+    // instead of an alert(): main.js shows its message below the Start/Stop buttons
+    engineError(reason) {
+        const err = new Error(`The audio engine could not start (${reason}), so nothing can play. ` +
+            'Press Start Audio to try again.');
+        err.name = 'AudioEngineError';
+        return err;
+    }
+
+    // The visitor's words for a microphone that could not be started (getUserMedia's error names;
+    // without navigator.mediaDevices the page is not a secure context)
+    micFailureReason(e) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            return 'This page cannot use a microphone: browsers allow it only on secure (https://) pages.';
+        }
+        const name = e && e.name;
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+            return 'Microphone access was refused. Allow microphone access for this page, then press Start Audio again.';
+        }
+        if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No microphone was found on this device.';
+        if (name === 'NotReadableError' || name === 'AbortError') {
+            return 'The microphone could not be opened; another application may be using it.';
+        }
+        return `The microphone could not be started (${name || e}).`;
     }
 
     loadScript(src) {

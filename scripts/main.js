@@ -400,8 +400,9 @@ function setupListeners() {
     ui.distSelect.onchange = (e) => {
         appState.currentIrIndex = parseInt(e.target.value);
 
-        if (audio.isPlaying) {
+        if (audio.isPlaying || transportState.starting) {
             // Just reloading IR might be enough, but stopping ensures clean state
+            // (also a Start in flight: it is cancelled and restarted with this distance's response)
             handleStop();
             // Wait slightly for audio graph cleanup if needed, but loadCurrentIR is async
             loadCurrentIR().then(() => {
@@ -416,14 +417,32 @@ function setupListeners() {
     ui.sourceRadios.forEach(radio => {
         radio.onchange = (e) => {
             if (e.target.checked) {
-                appState.currentSourceType = e.target.id.replace('src-', '');
+                // A new source type: stop what plays or is starting and release every microphone
+                // track (audio.stop) before the label changes; an explicit Start resumes
+                const type = e.target.id.replace('src-', '');
+                if (type !== appState.currentSourceType) handleStop();
+                appState.currentSourceType = type;
                 updateSourceUI();
             }
         };
     });
 
     // Audio Transport
-    ui.playBtn.onclick = handlePlay;
+    // The press makes and resumes the AudioContext before anything is awaited (audio.prime), so its
+    // user gesture is used also when the audio library is still loading or arrives later. A context
+    // that cannot be made (its constructor throws) ends this Start at once with the engine's failure
+    // message below the Start/Stop buttons, Start enabled
+    ui.playBtn.onclick = () => {
+        try {
+            audio.prime();
+        } catch (e) {
+            console.error('❌ AudioContext could not be made:', e);
+            showAudioMessage(audio.engineError(`the browser could not make an AudioContext: ${(e && e.name) || 'Error'}`).message);
+            resetTransport();
+            return;
+        }
+        return handlePlay();
+    };
     ui.stopBtn.onclick = handleStop;
 
     // Wet/Dry Toggle
@@ -634,12 +653,10 @@ async function performLocationChange(index) {
     ui.locSelect.value = targetLoc.Loc_name;
 
     // Stop audio immediately? 
-    const wasPlaying = audio.isPlaying;
-    if (wasPlaying) {
-        audio.stop();
-        ui.playBtn.disabled = false;
-        ui.stopBtn.disabled = true;
-    }
+    // Playing, or a Start in flight: stop it (a Start in flight never connects its source); it
+    // restarts below once the new location's response has loaded
+    const wasPlaying = audio.isPlaying || !!transportState.starting;
+    if (wasPlaying) handleStop();
 
     // Parallel Load Phase:
     // 1. Preload Image into Browser Cache (using new Image)
@@ -734,21 +751,30 @@ async function loadCurrentIR() {
     const url = irData ? `${irsPath}${irData.file}` : null;
     // an older request's failure named the location or distance chosen before this request
     showAudioMessage(null);
+    // this request's generation: audio.loadIR numbers every call when it is made
+    const request = audio.loadIR(url, irData ? irData.rotation : 0);
+    const requestGen = audio.irGeneration;
     try {
-        const applied = await audio.loadIR(url, irData ? irData.rotation : 0);
+        const applied = await request;
         if (applied) showAudioMessage(null);
         return applied;
     } catch (e) {
-        setAudioLoading(false);
-        ui.stopBtn.disabled = true;
-        showAudioMessage(irFailureMessage(loc, irData));
+        // a request that a newer one has replaced (also by a late rejection of the initialization
+        // it waited for) changes nothing: not the buttons, the wish to listen or the message
+        if (requestGen !== audio.irGeneration) return false;
+        transportState.want = false;
+        transportState.starting = 0;
+        resetTransport();
+        showAudioMessage(irFailureMessage(loc, irData, e));
         throw e;
     }
 }
 
 // The message for a response that could not be applied. A location without an IR (a picture-only
-// location) is told so, without an offer to try again.
-function irFailureMessage(loc, irData) {
+// location) is told so, without an offer to try again; an audio engine that could not start
+// (audio.js) names its cause.
+function irFailureMessage(loc, irData, e) {
+    if (e && e.name === 'AudioEngineError') return e.message;
     if (!irData) {
         if (loc.IRs && loc.IRs.length) {
             return `The chosen distance is not listed for ${loc.Loc_name}, so nothing is playing. Choose another distance.`;
@@ -759,17 +785,21 @@ function irFailureMessage(loc, irData) {
         'Press Start Audio to try again, or choose another location or distance.';
 }
 
+// Transport state. want: the visitor pressed Start and has not pressed Stop since (playing or
+// starting); starting: the generation of the Start in flight (0: none).
+const transportState = { want: false, starting: 0, last: 0 };
+
 // --- UI Helpers ---
 
-function setAudioLoading(isLoading) {
+// Start/Stop buttons from the real state: 'stopped' (Start enabled), 'loading' (Start disabled,
+// Stop enabled to cancel), 'playing' (Start disabled as "Playing...", Stop enabled)
+function setTransport(state) {
     const btn = ui.playBtn;
-    if (isLoading) {
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...';
-    } else {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-play-fill me-1"></i> Start Audio';
-    }
+    btn.disabled = state !== 'stopped';
+    btn.innerHTML = state === 'loading'
+        ? '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...'
+        : `<i class="bi bi-play-fill me-1"></i> ${state === 'playing' ? 'Playing...' : 'Start Audio'}`;
+    ui.stopBtn.disabled = state === 'stopped';
 }
 
 // Plain message right below the Start/Stop buttons (no alert() dialog); null hides it
@@ -799,45 +829,85 @@ function showAudioMessage(text) {
     el.hidden = false;
 }
 
+// Start enabled, Stop disabled (nothing is playing)
+function resetTransport() {
+    setTransport('stopped');
+}
+
+// Start button: one Start at a time; a press while a Start is in flight is ignored.
 async function handlePlay() {
-    setAudioLoading(true);
+    if (transportState.starting) return;
+    transportState.want = true;
+    await startPlayback();
+}
+
+// One Start with its own generation. It plays only the current location's and distance's response:
+// a load that a newer request superseded is repeated (a failure throws; loadCurrentIR shows it). A
+// location or distance change, Stop or a failed response makes it stale: it then returns without
+// touching the buttons (whoever cancelled it has set them), and audio.js never connects its source.
+async function startPlayback() {
+    const gen = transportState.starting = ++transportState.last;
+    const current = () => transportState.starting === gen;
+    setTransport('loading');
 
     try {
         await audio.init();
-        await loadCurrentIR();
+        // a Stop or a location or distance change during the engine start made this Start stale: it
+        // requests no response
+        if (!current()) return;
+        for (let tries = 0; (await loadCurrentIR()) === false; tries++) {
+            if (!current()) return;
+            if (tries >= 3) {
+                showAudioMessage('The location or distance changed while loading. Press Start Audio again.');
+                throw Object.assign(new Error('IR request superseded 4 times'), { shown: true });
+            }
+        }
+        if (!current()) return;
 
+        let started = false;
         const type = appState.currentSourceType;
         if (type === 'sample') {
             const file = ui.sampleSelect.value;
             const audioPath = config?.data?.audioPath || 'assets/audio/';
-            if (file) await audio.playSample(`${audioPath}${file}`);
+            if (file) started = await audio.playSample(`${audioPath}${file}`);
+            else showAudioMessage('No sound is listed in config.json (audio.samples), so nothing is playing. ' +
+                'Choose Mic or Upload, or add a sample.');
         } else if (type === 'mic') {
-            await audio.startMic();
+            started = await audio.startMic();
         } else if (type === 'upload') {
             const files = ui.fileInput.files;
-            if (files.length > 0) await audio.playFile(files[0]);
-            else {
-                alert("No file selected.");
-                setAudioLoading(false);
-                return;
-            }
+            if (files.length > 0) started = await audio.playFile(files[0]);
+            else showAudioMessage('No file selected. Choose a sound file, then press Start Audio.');
         }
-
-        ui.playBtn.disabled = true;
-        ui.stopBtn.disabled = false;
-        // Restore button text but keep it disabled as "playing"
-        ui.playBtn.innerHTML = '<i class="bi bi-play-fill me-1"></i> Playing...';
-
+        if (!current()) return;
+        if (started !== true) transportState.want = false;
+        setTransport(started === true && audio.isPlaying ? 'playing' : 'stopped');
     } catch (e) {
         console.error("Audio playback failed:", e);
-        setAudioLoading(false);
+        if (!current()) return;
+        transportState.want = false;
+        if (e && e.name === 'SampleLoadError') {
+            showAudioMessage(`The sound (${e.sampleName || 'sample'}) could not be loaded, so nothing is playing. ` +
+                'Press Start Audio to try again, or choose another sound.');
+        } else if (e && (e.name === 'MicStartError' || e.name === 'AudioEngineError' || e.name === 'AudioSuspendedError')) {
+            showAudioMessage(e.message); // the cause, named by audio.js
+        } else if (!(e && e.shown)) { // any other error (a failed call of the audio graph, for example)
+            showAudioMessage(`Playback could not start (${(e && e.name) || 'error'}), so nothing is playing. ` +
+                'Press Start Audio to try again.');
+        }
+        setTransport('stopped');
+    } finally {
+        if (current()) transportState.starting = 0;
     }
 }
 
+// Stop also cancels a Start in flight; it stops every source and releases every microphone track
+// (audio.stop)
 function handleStop() {
+    transportState.want = false;
+    transportState.starting = 0;
     audio.stop();
-    setAudioLoading(false); // Reset to "Start Audio" state
-    ui.stopBtn.disabled = true;
+    setTransport('stopped');
 }
 
 // --- Main Animation Loop ---
