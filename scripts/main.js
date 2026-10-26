@@ -399,25 +399,21 @@ function setupListeners() {
     ui.distSelect.onchange = (e) => {
         appState.currentIrIndex = parseInt(e.target.value);
 
-        if (audio.isPlaying || transportState.starting) {
-            // Just reloading IR might be enough, but stopping ensures clean state
-            // (also a Start in flight: it is cancelled and restarted with this distance's response)
-            handleStop();
-            // Wait slightly for audio graph cleanup if needed, but loadCurrentIR is async
-            loadCurrentIR().then(() => {
-                handlePlay();
-            }, () => { }); // a failure is shown by loadCurrentIR
-        } else {
-            loadCurrentIR().catch(() => { });
-        }
+        // Hold the sound (a playing source or a Start in flight is cancelled; Loading while the
+        // visitor wants sound) and load this distance's response; settleNavigation() restarts once,
+        // when no location change is in progress and the newest response is in; a failure is
+        // shown by loadCurrentIR()
+        holdForResponse();
+        requestIR();
     };
 
     // Source Type Radio
     ui.sourceRadios.forEach(radio => {
         radio.onchange = (e) => {
             if (e.target.checked) {
-                // A new source type: stop what plays or is starting and release every microphone
-                // track (audio.stop) before the label changes; an explicit Start resumes
+                // A new source type: before the label changes, a Start in flight is cancelled and what
+                // plays is stopped (handleStop, audio.stop: its output fades out in 25 ms); a
+                // microphone's tracks are released at the end of that fade. An explicit Start resumes
                 const type = e.target.id.replace('src-', '');
                 if (type !== appState.currentSourceType) handleStop();
                 appState.currentSourceType = type;
@@ -639,14 +635,27 @@ function revealSkybox() {
 // Core logic for changing location (loading, switching, restarting audio)
 async function performLocationChange(index) {
     if (index === -1) return;
-    if (index === appState.currentLocIndex) return;
 
     // NAVIGATION LOCK
     if (appState.isNavigating) {
-        // queue the newest request instead of dropping it; it runs when this change ends
+        // queue the newest request instead of dropping it, also when it names the location now
+        // loading (the menu shows it; an older queued location is dropped); the sound is held at
+        // once and plays only after the newest location's response is in (settleNavigation)
         appState.pendingNavIndex = index;
+        holdForResponse();
+        // the location being loaded is chosen again while its response failure is held (it failed
+        // after another location had been queued, see loadCurrentIR): that failure now applies,
+        // nothing plays, and its message is shown
+        if (index === appState.currentLocIndex && navState.irHeld) {
+            showAudioMessage(navState.irHeld);
+            navState.irHeld = false;
+            transportState.want = false;
+            transportState.starting = 0;
+            resetTransport();
+        }
         return;
     }
+    if (index === appState.currentLocIndex) return;
     appState.isNavigating = true;
 
     const targetLoc = appState.locations[index];
@@ -670,21 +679,20 @@ async function performLocationChange(index) {
     window.currentValue = targetLoc.Loc_name;
     ui.locSelect.value = targetLoc.Loc_name;
 
-    // Stop audio immediately? 
-    // Playing, or a Start in flight: stop it (a Start in flight never connects its source); it
-    // restarts below once the new location's response has loaded
-    const wasPlaying = audio.isPlaying || !!transportState.starting;
-    if (wasPlaying) handleStop();
+    // Playing, or a Start in flight: cancel it (its source never connects) and show Loading
+    // until this location is shown and its response is in (settleNavigation)
+    holdForResponse();
 
     // Parallel Load Phase:
     // 1. Preload Image into Browser Cache (using new Image)
     const imageLoad = loadImageAsync(targetLoc);
 
     // 2. Decode Audio (Background - Do NOT block visual transition)
-    // We let this happen in parallel. If it finishes early, good. If late, audio updates when ready.
-    // This restores the "Fast" feel of the visual transition.
-    const irLoadPromise = loadCurrentIR();
-    irLoadPromise.catch(() => { }); // a failure is shown by loadCurrentIR
+    // We let this happen in parallel. If it finishes early, good; if late, the sound is held until
+    // it is in. This restores the "Fast" feel of the visual transition.
+    // Tracked request: settleNavigation waits for it (a failure is shown by loadCurrentIR, which
+    // has stopped playback; a distance change during the load supersedes it)
+    requestIR();
 
     // Wait ONLY for Image
     await imageLoad;
@@ -716,31 +724,21 @@ async function performLocationChange(index) {
     // 2. Update GUI Text
     updateUI();
 
-    // 3. Restart Audio (if it was playing)
-    // If IR is still loading, playBuffer/convolver update will wait or handle it?
-    // loadCurrentIR updates 'currentIrBuffer'.
-    // If we call handlePlay() before IR is done, it might play Dry or play old IR?
-    // We should probably wait for IR *before* restarting playback, BUT not before showing image.
-
-    if (wasPlaying) {
-        // If IR is fast/cached, this is instant. If slow, we wait for it to finish before making sound.
-        // This prevents playing with wrong IR.
-        irLoadPromise.then(() => {
-            handlePlay();
-        }, () => { });
-    }
+    // No restart here: settleNavigation (below, or the queued location change's own) restarts
+    // once, when the newest location is shown and its response is in
 
     document.body.style.cursor = 'default';
     appState.isNavigating = false; // RELEASE LOCK
 
     preloadAdjacentAssets(index);
 
-    // run a location change requested while this one was loading
+    // run a location change requested while this one was loading (it settles)
     if (appState.pendingNavIndex !== undefined && appState.pendingNavIndex !== null) {
         const next = appState.pendingNavIndex;
         appState.pendingNavIndex = null;
-        if (next !== appState.currentLocIndex) await performLocationChange(next);
+        if (next !== appState.currentLocIndex) return performLocationChange(next);
     }
+    settleNavigation();
 }
 
 // Loads the location chosen in the location menu. map.js no longer calls it (a dot sets the menu
@@ -787,10 +785,19 @@ async function loadCurrentIR() {
         // a request that a newer one has replaced (also by a late rejection of the initialization
         // it waited for) changes nothing: not the buttons, the wish to listen or the message
         if (requestGen !== audio.irGeneration) return false;
-        transportState.want = false;
-        transportState.starting = 0;
-        resetTransport();
-        showAudioMessage(irFailureMessage(loc, irData, e));
+        // another location is queued: the visitor has left this one, so its failure neither ends
+        // the wish to listen nor shows under the queued location; the failure (its message) is held
+        // and applies only if this location is chosen again (the queue in performLocationChange);
+        // the queued location's request clears it
+        const queued = appState.pendingNavIndex;
+        const held = queued !== undefined && queued !== null && queued !== appState.currentLocIndex;
+        navState.irHeld = held ? irFailureMessage(loc, irData, e) : false;
+        if (!held) {
+            transportState.want = false;
+            transportState.starting = 0;
+            resetTransport();
+            showAudioMessage(irFailureMessage(loc, irData, e));
+        }
         throw e;
     }
 }
@@ -810,9 +817,68 @@ function irFailureMessage(loc, irData, e) {
         'Press Start Audio to try again, or choose another location or distance.';
 }
 
-// Transport state. want: the visitor pressed Start and has not pressed Stop since (playing or
-// starting); starting: the generation of the Start in flight (0: none).
-const transportState = { want: false, starting: 0, last: 0 };
+// Transport state. want: the visitor pressed Start and has not pressed Stop since (playing,
+// starting, or held during a navigation); starting: the generation of the Start in flight (0: none);
+// resuming: the resume() of a suspended AudioContext that a press made (handlePlay), raced against a
+// 3 s timer: set until the first of the two settles, else null.
+const transportState = { want: false, starting: 0, last: 0, resuming: null };
+
+// Navigation state: irGen counts the IR requests of location and distance changes, irSettled is the
+// newest one that has finished (applied or failed); irHeld: the message of a response failure of the
+// location being loaded that arrived while another location was queued (its stop and its message
+// are held), else false.
+const navState = { irGen: 0, irSettled: 0, irHeld: false };
+
+// A location or distance change: when the visitor wants sound, cancel what plays or is starting
+// (audio.stop makes a Start in flight stale) and show Loading until settleNavigation restarts.
+// Returns whether the visitor wants sound.
+function holdForResponse() {
+    if (!transportState.want) return false;
+    transportState.starting = 0;
+    audio.stop();
+    setTransport('loading');
+    return true;
+}
+
+// Load the current location's and distance's response as a tracked request; when the newest
+// tracked request finishes, settleNavigation decides
+function requestIR() {
+    const gen = ++navState.irGen;
+    navState.irHeld = false; // a held failure belonged to the request this one replaces
+    const done = () => {
+        if (gen !== navState.irGen) return; // superseded by a newer location or distance change
+        navState.irSettled = gen;
+        settleNavigation();
+    };
+    loadCurrentIR().then(done, done);
+}
+
+// true while a location change runs, a queued location waits, or the newest location or distance
+// change's response is still loading
+function navigationBusy() {
+    const pending = appState.pendingNavIndex;
+    return appState.isNavigating || navState.irSettled !== navState.irGen ||
+        (pending !== undefined && pending !== null && pending !== appState.currentLocIndex);
+}
+
+// The one place that restarts after a navigation: once nothing is busy, when the visitor still
+// wants sound and nothing plays or starts; location, distance, menus and display then agree. It runs
+// outside a press, so it restarts only in a running AudioContext and never calls resume() itself
+// (WebKit keeps a resume() made without a user gesture pending until the context runs): while a
+// press's own resume() runs it waits for it, at most 3 s (handlePlay calls this again), otherwise
+// Start is shown again and the next press resumes the context.
+function settleNavigation() {
+    if (navigationBusy()) return;
+    if (!transportState.want || transportState.starting || audio.isPlaying) return;
+    if (!audio.ctx || audio.ctx.state !== 'running') {
+        if (transportState.resuming) return;
+        transportState.want = false;
+        resetTransport();
+        if (audio.ctx) showAudioMessage('The browser has not let the sound start yet. Press Start Audio to play.');
+        return;
+    }
+    startPlayback();
+}
 
 // --- UI Helpers ---
 
@@ -859,10 +925,29 @@ function resetTransport() {
     setTransport('stopped');
 }
 
-// Start button: one Start at a time; a press while a Start is in flight is ignored.
+// Start button: one Start at a time; a press while a Start is in flight is ignored. During a
+// navigation (navigationBusy) it only records the wish and shows Loading: settleNavigation then
+// starts once, with the newest location's and distance's response, never the old one.
 async function handlePlay() {
     if (transportState.starting) return;
     transportState.want = true;
+    // the press itself resumes a suspended AudioContext (WebKit keeps a resume() made outside a
+    // user gesture pending until the context runs); a Start held by a navigation is restarted later,
+    // outside the press, by settleNavigation, which waits for this resume() at most 3 s (it runs
+    // again when it has settled or 3 s have passed) and restarts only in a running context
+    if (audio.ctx && audio.ctx.state !== 'running') {
+        const resuming = transportState.resuming = Promise.race([
+            audio.ctx.resume().catch(() => { }),
+            new Promise(resolve => setTimeout(resolve, 3000)),
+        ]).then(() => {
+            if (transportState.resuming === resuming) transportState.resuming = null;
+            settleNavigation();
+        });
+    }
+    if (navigationBusy()) {
+        setTransport('loading');
+        return;
+    }
     await startPlayback();
 }
 
@@ -926,8 +1011,8 @@ async function startPlayback() {
     }
 }
 
-// Stop also cancels a Start in flight; it stops every source and releases every microphone track
-// (audio.stop)
+// Stop also cancels a Start in flight, a held restart and a Start pressed during a navigation; it
+// stops every source and releases every microphone track (audio.stop)
 function handleStop() {
     transportState.want = false;
     transportState.starting = 0;

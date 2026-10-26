@@ -162,11 +162,8 @@ class AudioEngine {
         this.dryGainNode = this.ctx.createGain();
         this.wetGainNode = this.ctx.createGain();
 
-        // Initial state, set directly before any source connects: a ramp from a new GainNode's
-        // value 1 let the unconvolved source through on the first wet Start
-        const initialGains = this.dryWetTargets();
-        this.wetGainNode.gain.value = initialGains.wet;
-        this.dryGainNode.gain.value = initialGains.dry;
+        // The shared dry and wet gains stay at 1: each source has its own mode gains, made at the
+        // requested state before it connects (connectSourceGraph)
 
         // Connect Wet Path End
         // Rotator -> Decoder -> WetGain -> MasterGain
@@ -185,26 +182,28 @@ class AudioEngine {
         this.updateDryWet();
     }
 
+    // A switch acts on the playing source's own mode gains (connectSourceGraph) only: a source that
+    // still fades after a stop (a release, see stop) keeps its own, so the switch never changes that
+    // release. With no source nothing is set; the next one starts at the requested state.
     updateDryWet() {
-        if (!this.ctx || !this.wetGainNode || !this.dryGainNode) return;
+        if (!this.ctx || !this.voiceWetMode || !this.voiceDryMode) return;
         const rampTime = 0.1;
         const t = this.ctx.currentTime;
         const g = this.dryWetTargets();
 
-        // Smoothed only while a source plays in a running context; otherwise nothing is audible and
-        // the requested state is set at once (an idle GainNode does not advance a ramp, which would
-        // then start only with the next source and let the dry path through)
+        // Smoothed only while the source plays in a running context; otherwise nothing is audible and
+        // the requested state is set at once (an idle GainNode does not advance a ramp)
         if (this.ctx.state !== 'running' || !this.isPlaying) {
             this.setDryWetNow(g);
             return;
         }
-        this.wetGainNode.gain.setTargetAtTime(g.wet, t, rampTime);
-        this.dryGainNode.gain.setTargetAtTime(g.dry, t, rampTime);
+        this.voiceWetMode.gain.setTargetAtTime(g.wet, t, rampTime);
+        this.voiceDryMode.gain.setTargetAtTime(g.dry, t, rampTime);
     }
 
-    // Set both gains to the requested state at once, dropping any scheduled ramp
+    // Set the playing source's mode gains to the requested state at once, dropping any scheduled ramp
     setDryWetNow(g) {
-        [[this.wetGainNode, g.wet], [this.dryGainNode, g.dry]].forEach(([node, v]) => {
+        [[this.voiceWetMode, g.wet], [this.voiceDryMode, g.dry]].forEach(([node, v]) => {
             node.gain.cancelScheduledValues(0);
             node.gain.value = v;
         });
@@ -312,9 +311,7 @@ class AudioEngine {
     // A failed IR load: stop playback, drop the previous response and its rotation, and throw an
     // error that names the file (main.js shows a message near the controls).
     failIR(url, cause) {
-        this.cancelStart(); // a Start in flight is cancelled too: its source never connects
-        this.stopSource();
-        this.teardownConvolver();
+        this.stop(); // a Start in flight is cancelled; what sounds ends within the release
         this.currentIrBuffer = null;
         this.currentIrUrl = null;
         this.irRotationOffset = 0;
@@ -325,22 +322,6 @@ class AudioEngine {
         err.name = 'IrLoadError';
         err.irUrl = url || null;
         throw err;
-    }
-
-    // Disconnect the per-channel convolvers and their input node
-    teardownConvolver() {
-        if (this.foaConvolvers) {
-            this.foaConvolvers.forEach(c => c.disconnect());
-            this.foaConvolvers = null;
-        }
-        if (this.foaOut) {
-            this.foaOut.disconnect();
-            this.foaOut = null;
-        }
-        if (this.convolverNode) {
-            this.convolverNode.disconnect();
-            this.convolverNode = null;
-        }
     }
 
     // Start request generation. playSample, playFile and startMic each begin one; stop() and a
@@ -577,25 +558,41 @@ class AudioEngine {
     }
 
     connectSourceGraph() {
-        // A new source (called only after stopSource) starts at the requested gains: a ramp left
-        // from an idle toggle or interrupted by Stop must not shape its first frames
-        if (this.wetGainNode && this.dryGainNode) this.setDryWetNow(this.dryWetTargets());
-
         // Disconnect old nodes if any
         if (this.convolverNode) {
             this.convolverNode.disconnect();
             this.convolverNode = null;
         }
 
+        // This source's own gains, in front of the shared dry and wet gains: per path a mode gain,
+        // made at the requested state (a ramp left from an earlier switch or source cannot shape its
+        // first frames; a switch ramps only the playing source's, updateDryWet), then a release gain,
+        // which stop() fades. A source that starts, or a switch made, while an earlier source still
+        // fades leaves that source's gains alone: its release is not stepped, cut or restored.
+        [this.voiceDryMode, this.voiceWetMode, this.voiceDry, this.voiceWet].forEach(node => {
+            if (node) node.disconnect();
+        });
+        const g = this.dryWetTargets();
+        this.voiceDryMode = this.ctx.createGain();
+        this.voiceWetMode = this.ctx.createGain();
+        this.voiceDryMode.gain.value = g.dry;
+        this.voiceWetMode.gain.value = g.wet;
+        this.voiceDry = this.ctx.createGain();
+        this.voiceWet = this.ctx.createGain();
+        this.voiceDryMode.connect(this.voiceDry);
+        this.voiceWetMode.connect(this.voiceWet);
+        this.voiceDry.connect(this.dryGainNode);
+        this.voiceWet.connect(this.rotator.in);
+
         // Create Convolver for Wet Path
         this.setupConvolver();
 
         // Connect Source
         // 1. To Convolver (Wet Path)
-        // 2. To Dry Gain (Dry Path)
+        // 2. To Dry Gain (Dry Path), through this source's own dry gains
 
         this.sourceNode.connect(this.convolverNode);
-        this.sourceNode.connect(this.dryGainNode);
+        this.sourceNode.connect(this.voiceDryMode);
     }
 
     setupConvolver() {
@@ -641,8 +638,8 @@ class AudioEngine {
             this.foaConvolvers.push(conv);
         }
 
-        // Connect to Rotator (Input of Wet Chain)
-        this.foaOut.connect(this.rotator.in);
+        // Connect to Rotator (Input of Wet Chain), through the source's own wet gains
+        this.foaOut.connect(this.voiceWetMode || this.rotator.in);
         // A source that is already playing is moved to the new input
         if (this.sourceNode) {
             this.sourceNode.connect(this.convolverNode);
@@ -668,9 +665,74 @@ class AudioEngine {
         this.isPlaying = false;
     }
 
+    // Stop, a navigation hold and a failure end all output. The source's own release gains
+    // (connectSourceGraph) fall to 0 in a 25 ms linear ramp, meant to avoid a click, and the source
+    // stops at the end of the ramp. Once the context has rendered the ramp, the source, its
+    // convolvers with the reverberation they still hold and its gains are disconnected and a
+    // microphone's tracks are stopped (finishRelease), so no old tail can sound later. A source
+    // started or a mode switch made meanwhile does not touch these gains (the new source has its
+    // own gains and convolvers). A playing source is not cut otherwise.
     stop() {
         this.cancelStart(); // a Start in flight is cancelled too: its source never connects
-        this.stopSource();
+        const source = this.sourceNode;
+        const voice = [this.voiceDry, this.voiceWet].filter(Boolean);
+        const release = {
+            nodes: [source, this.convolverNode, this.foaOut, ...(this.foaConvolvers || []),
+                this.voiceDryMode, this.voiceWetMode, ...voice].filter(Boolean),
+            stream: this.micStream
+        };
+        this.sourceNode = null;
+        this.convolverNode = null;
+        this.foaOut = null;
+        this.foaConvolvers = null;
+        this.voiceDryMode = null;
+        this.voiceWetMode = null;
+        this.voiceDry = null;
+        this.voiceWet = null;
+        this.micStream = null;
+        this.isPlaying = false;
+        if (!release.nodes.length && !release.stream) return;
+        if (!this.releases) this.releases = new Set();
+        this.releases.add(release);
+        const ctx = this.ctx;
+        if (!ctx || !voice.length) {
+            this.finishRelease(release); // nothing to fade
+            return;
+        }
+        const t = ctx.currentTime;
+        const end = t + 0.025; // seconds
+        voice.forEach(node => {
+            node.gain.cancelScheduledValues(t);
+            node.gain.setValueAtTime(node.gain.value, t);
+            node.gain.linearRampToValueAtTime(0, end);
+        });
+        if (source && source.stop) {
+            try {
+                source.stop(end);
+            } catch (e) { } // ignore if already stopped
+        }
+        // The release ends by the context's clock, not the wall clock: an output that renders in
+        // long periods renders the ramp later. It ends at once when the context does not run
+        // (nothing is rendered), and after at most 1 s in any case.
+        const until = Date.now() + 1000;
+        const check = () => {
+            const rendered = ctx.state !== 'running' || ctx.currentTime >= end + 128 / ctx.sampleRate;
+            if (rendered || Date.now() > until) this.finishRelease(release);
+            else release.timer = setTimeout(check, 10);
+        };
+        release.timer = setTimeout(check, 30);
+    }
+
+    // The end of a release: the stopped source, its convolvers and its gains are disconnected, their
+    // tail with them, and a microphone's tracks are stopped
+    finishRelease(release) {
+        if (!this.releases || !this.releases.delete(release)) return;
+        clearTimeout(release.timer);
+        release.nodes.forEach(node => node.disconnect());
+        if (release.stream) {
+            release.stream.getTracks().forEach(track => track.stop());
+            console.log("Mic stream stopped");
+        }
     }
 
     // An error of the audio engine itself (no Web Audio, JSAmbisonics missing or failing), thrown
