@@ -41,8 +41,9 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
         onerror="console.warn('Failed to load Bootstrap Icons')">
 
-    <!-- JSAmbisonics - Load with error handling -->
-    <script src="./JSAmbisonics/ambisonics.umd.js" onerror="console.error('Failed to load JSAmbisonics')"></script>
+    <!-- JSAmbisonics - Deferred (with error handling): the page is parsed and painted while it loads;
+         deferred scripts run in document order, so it still runs before the app scripts below -->
+    <script src="./JSAmbisonics/ambisonics.umd.js" defer onerror="console.error('Failed to load JSAmbisonics')"></script>
 
     <!-- App Scripts - Deferred for non-blocking load -->
     <script src="./scripts/audio.js" defer onerror="console.error('Failed to load audio.js')"></script>
