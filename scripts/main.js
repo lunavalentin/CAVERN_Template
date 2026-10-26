@@ -450,16 +450,12 @@ function setupListeners() {
         const isWet = e.target.checked;
         audio.setDryWet(isWet);
 
-        // Apply grayscale filter when dry (not wet)
-        if (ui.sky) {
-            if (isWet) {
-                // Wet mode: full color
-                ui.sky.setAttribute('material', 'shader: flat; color: #FFFFFF');
-            } else {
-                // Dry mode: grayscale
-                ui.sky.setAttribute('material', 'shader: flat; color: #888888');
-            }
-        }
+        // Apply grayscale filter when dry (not wet), on both sky elements of the double buffer
+        // (the visible one alternates between #sky and #sky-buffer)
+        ['sky', 'sky-buffer'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.setAttribute('material', `shader: flat; color: ${isWet ? '#FFFFFF' : '#888888'}`);
+        });
     };
 
     // Volume Slider
@@ -542,6 +538,21 @@ function updateUI() {
     }
 
     // 4. Update Distance Dropdown
+    fillIrMenu(loc);
+
+    // 5. Update Sky (360 Image) - Handled by swapSkybox (Double Buffering)
+    // We do NOT touch the sky element here to prevent conflict with the swap logic.
+    // const imagesPath = config?.data?.imagesPath || 'assets/images/';
+    // const bgUrl = `${imagesPath}${loc.Photo_Name}`;
+    // ui.sky.setAttribute('src', bgUrl); 
+
+    // Logging for debug
+    console.log(`ℹ️ UI Updated for ${loc.Loc_name}`);
+}
+
+// The Distance menu: the location's IRs, the chosen one selected (also called at the start of a
+// location change, so the menu never lists the previous location's IRs)
+function fillIrMenu(loc) {
     ui.distSelect.innerHTML = '';
     if (loc.IRs) {
         loc.IRs.forEach((ir, idx) => {
@@ -553,15 +564,6 @@ function updateUI() {
         });
     }
     ui.distSelect.value = appState.currentIrIndex;
-
-    // 5. Update Sky (360 Image) - Handled by swapSkybox (Double Buffering)
-    // We do NOT touch the sky element here to prevent conflict with the swap logic.
-    // const imagesPath = config?.data?.imagesPath || 'assets/images/';
-    // const bgUrl = `${imagesPath}${loc.Photo_Name}`;
-    // ui.sky.setAttribute('src', bgUrl); 
-
-    // Logging for debug
-    console.log(`ℹ️ UI Updated for ${loc.Loc_name}`);
 }
 
 function updateSourceUI() {
@@ -634,7 +636,8 @@ async function performLocationChange(index) {
 
     // NAVIGATION LOCK
     if (appState.isNavigating) {
-        console.warn("⚠️ Navigation blocked: Already navigating.");
+        // queue the newest request instead of dropping it; it runs when this change ends
+        appState.pendingNavIndex = index;
         return;
     }
     appState.isNavigating = true;
@@ -645,8 +648,16 @@ async function performLocationChange(index) {
     // We use cursor feedback instead for the split-second wait.
     document.body.style.cursor = 'wait';
 
+    // keep the chosen IR (Distance menu) when the new location offers it: the IR with the same
+    // label, else the same entry, else the first. The menu lists the new location's IRs at once,
+    // so an IR chosen while the change runs is one of the new location's.
+    const prevIr = ((appState.locations[appState.currentLocIndex] || {}).IRs || [])[appState.currentIrIndex];
     appState.currentLocIndex = index;
-    appState.currentIrIndex = 0;
+    const irs = targetLoc.IRs || [];
+    const sameLabel = prevIr ? irs.findIndex((ir) => ir.label === prevIr.label) : -1;
+    const keepIr = appState.currentIrIndex;
+    appState.currentIrIndex = sameLabel >= 0 ? sameLabel : ((keepIr >= 0 && keepIr < irs.length) ? keepIr : 0);
+    fillIrMenu(targetLoc);
 
     // Sync globals for map.js
     window.currentValue = targetLoc.Loc_name;
@@ -716,6 +727,13 @@ async function performLocationChange(index) {
     appState.isNavigating = false; // RELEASE LOCK
 
     preloadAdjacentAssets(index);
+
+    // run a location change requested while this one was loading
+    if (appState.pendingNavIndex !== undefined && appState.pendingNavIndex !== null) {
+        const next = appState.pendingNavIndex;
+        appState.pendingNavIndex = null;
+        if (next !== appState.currentLocIndex) await performLocationChange(next);
+    }
 }
 
 // Loads the location chosen in the location menu. map.js no longer calls it (a dot sets the menu
