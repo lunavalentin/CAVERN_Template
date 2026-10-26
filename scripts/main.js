@@ -99,6 +99,7 @@ async function initApp() {
             await performLocationChange(startIdx);
         } else {
             updateUI();
+            ui.locDisplay.textContent = 'No locations'; // none in DataSet.csv: not 'Loading...' for good
         }
 
         // 4. Mark as ready & Hide Overlay
@@ -429,7 +430,8 @@ function setupListeners() {
     // message below the Start/Stop buttons, Start enabled
     ui.playBtn.onclick = () => {
         try {
-            audio.prime();
+            // with no locations nothing starts (handlePlay says so), so no AudioContext is made
+            if (appState.locations.length > 0) audio.prime();
         } catch (e) {
             console.error('❌ AudioContext could not be made:', e);
             showAudioMessage(audio.engineError(`the browser could not make an AudioContext: ${(e && e.name) || 'Error'}`).message);
@@ -478,11 +480,11 @@ function loadImageAsync(loc) {
         img.crossOrigin = 'anonymous'; // the request mode of A-Frame's texture load, so its request can reuse this one
         img.onload = () => {
             console.log(`🖼️ Image preloaded: ${loc.Photo_Name}`);
-            resolve(url);
+            resolve(img); // the loaded image itself: prepareSkybox makes the sky's texture from it
         };
         img.onerror = () => {
             console.warn(`⚠️ Failed to preload image: ${url}`);
-            resolve(url); // Proceed anyway to let A-Frame try or fail gracefully
+            resolve(null); // a failure, never a loaded image (the location change then fails)
         };
         img.src = url;
     });
@@ -592,29 +594,139 @@ function getSkyElements() {
     return { active: s2, inactive: s1 };
 }
 
-function prepareSkybox(loc) {
+// The camera's look-controls once A-Frame has initialised it (its yaw and pitch objects exist),
+// else null
+function lookControlsNow(camera) {
+    const lc = camera && camera.components ? camera.components['look-controls'] : null;
+    return lc && lc.yawObject && lc.pitchObject ? lc : null;
+}
+
+// Whether look-controls can still initialise on this camera: the camera entity has not loaded yet,
+// or it declares look-controls. A loaded camera without it (a custom camera entity) never gets one.
+function lookControlsCanCome(camera) {
+    return !!camera && (!camera.hasLoaded || camera.hasAttribute('look-controls'));
+}
+
+// Resolves the camera's look-controls once it has initialised (the camera's componentinitialized
+// or loaded event, or a 50 ms check), or null after ms or as soon as it cannot come any more. On a
+// freshly opened page the first location's panorama can be ready before A-Frame has initialised the
+// camera.
+function lookControlsReady(camera, ms) {
+    const now = lookControlsNow(camera);
+    if (now || !camera) return Promise.resolve(now);
+    return new Promise((resolve) => {
+        let done = false, tick = 0, bound = 0;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(tick);
+            clearTimeout(bound);
+            camera.removeEventListener('componentinitialized', onEvent);
+            camera.removeEventListener('loaded', onEvent);
+            resolve(lookControlsNow(camera));
+        };
+        const onEvent = () => { if (lookControlsNow(camera) || !lookControlsCanCome(camera)) finish(); };
+        const poll = () => {
+            if (done) return;
+            if (lookControlsNow(camera) || !lookControlsCanCome(camera)) return finish();
+            tick = setTimeout(poll, 50);
+        };
+        camera.addEventListener('componentinitialized', onEvent);
+        camera.addEventListener('loaded', onEvent);
+        tick = setTimeout(poll, 50);
+        bound = setTimeout(finish, ms);
+    });
+}
+
+// A start view whose look-controls wait ran out: applied as soon as look-controls initialises
+// (the newest such location's), unless a later location change has applied its own start view first
+const startView = { pending: null, waiting: false };
+function applyStartViewWhenReady(camera, rotRad) {
+    startView.pending = rotRad;
+    console.warn('look-controls not initialised yet: the start view is applied when it is');
+    if (startView.waiting || !camera) return;
+    startView.waiting = true;
+    const onEvent = () => {
+        const lc = lookControlsNow(camera);
+        if (!lc) return;
+        camera.removeEventListener('componentinitialized', onEvent);
+        camera.removeEventListener('loaded', onEvent);
+        startView.waiting = false;
+        if (startView.pending === null) return;
+        lc.pitchObject.rotation.x = 0;
+        lc.yawObject.rotation.y = startView.pending;
+        startView.pending = null;
+    };
+    camera.addEventListener('componentinitialized', onEvent);
+    camera.addEventListener('loaded', onEvent);
+}
+
+// What the sky's THREE material map holds: 'ready' (the image of the resolved URL src, with positive
+// dimensions), 'failed' (that URL as a video element, which A-Frame makes after a failed HEAD
+// request, or a broken image) or 'pending' (another or no image yet). src is the preloaded image's
+// own resolved URL, compared as a whole: a Photo_Name may contain folders, a query or characters
+// that the URL encodes, and the map may hold another element of the same URL (A-Frame caches
+// textures by URL).
+function skyImageState(el, src) {
+    const mesh = el && el.getObject3D && el.getObject3D('mesh');
+    const map = mesh && mesh.material ? mesh.material.map : null;
+    const img = map ? map.image : null;
+    if (!img || !src || img.src !== src) return 'pending';
+    if (typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement) return 'failed';
+    if ((img.naturalWidth || img.width) > 0 && (img.naturalHeight || img.height) > 0 && img.complete !== false) return 'ready';
+    return img.complete === true ? 'failed' : 'pending';
+}
+
+// Resolves the inactive sky once its material really holds this location's panorama (skyImageState
+// 'ready'), checked at once, on materialtextureloaded and on every animation frame (a 200 ms timer
+// too, for a hidden tab). imageLoad is loadImageAsync's promise: the sky's texture is made from the
+// loaded image itself (material src = the <img> element), so A-Frame makes no request of its own (no
+// HEAD check, no second GET) and keeps no texture promise for a URL that can stay unsettled after a
+// failed GET (A-Frame 1.4.2 caches one per src, and setting the same src again makes no new request).
+// Resolves null on a failed preload (imageLoad gives null), a failed texture, or 30 s after the image
+// loaded (the preload itself stays unbounded). No event or timer alone means ready. superseded(): a
+// newer location was chosen meanwhile; the wait then ends at once (null), also during the preload,
+// and a late image is not put on the sky.
+function prepareSkybox(loc, imageLoad, superseded) {
     return new Promise((resolve) => {
         const { active, inactive } = getSkyElements();
-        const imagesPath = config?.data?.imagesPath || 'assets/images/';
-        const url = `${imagesPath}${loc.Photo_Name}`;
-
-        // 1. Setup the INACTIVE sky (Hidden)
-        inactive.setAttribute('src', url);
-        // We do NOT rotate the sky anymore. We rotate the camera instead.
-        inactive.setAttribute('rotation', `0 0 0`);
-
-        const onLoaded = () => {
-            // Just resolve, do NOT swap yet
-            resolve(inactive);
+        let done = false, frame = 0, tick = 0, bound = 0, image = null;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            cancelAnimationFrame(frame);
+            clearTimeout(tick);
+            clearTimeout(bound);
+            inactive.removeEventListener('materialtextureloaded', onEvent);
+            resolve(ok ? inactive : null); // do NOT swap yet
         };
-
-        inactive.addEventListener('materialtextureloaded', onLoaded, { once: true });
-
-        // Fallback safety
-        setTimeout(() => {
-            inactive.removeEventListener('materialtextureloaded', onLoaded);
-            onLoaded();
-        }, 2000);
+        const check = () => {
+            if (done) return;
+            cancelAnimationFrame(frame);
+            clearTimeout(tick);
+            if (superseded && superseded()) return finish(false);
+            if (image) {
+                const state = skyImageState(inactive, image.src);
+                if (state === 'ready') return finish(true);
+                if (state === 'failed') return finish(false);
+            }
+            frame = requestAnimationFrame(check);
+            tick = setTimeout(check, 200);
+        };
+        const onEvent = () => check();
+        inactive.addEventListener('materialtextureloaded', onEvent);
+        Promise.resolve(imageLoad).then((loaded) => {
+            if (done) return;
+            if (!loaded || typeof loaded !== 'object') return finish(false);
+            image = loaded;
+            bound = setTimeout(() => finish(false), 30000);
+            // 1. Setup the INACTIVE sky (Hidden): the texture from the loaded image element
+            inactive.setAttribute('material', 'src', loaded);
+            // We do NOT rotate the sky anymore. We rotate the camera instead.
+            inactive.setAttribute('rotation', `0 0 0`);
+            check();
+        }, () => finish(false));
+        check();
     });
 }
 
@@ -633,7 +745,7 @@ function revealSkybox() {
 // --- Integration Functions for map.js ---
 
 // Core logic for changing location (loading, switching, restarting audio)
-async function performLocationChange(index) {
+async function performLocationChange(index, again) { /* again: load the current location again */
     if (index === -1) return;
 
     // NAVIGATION LOCK
@@ -645,18 +757,35 @@ async function performLocationChange(index) {
         holdForResponse();
         // the location being loaded is chosen again while its response failure is held (it failed
         // after another location had been queued, see loadCurrentIR): that failure now applies,
-        // nothing plays, and its message is shown
+        // nothing plays
         if (index === appState.currentLocIndex && navState.irHeld) {
-            showAudioMessage(navState.irHeld);
             navState.irHeld = false;
             transportState.want = false;
             transportState.starting = 0;
             resetTransport();
         }
+        // the status names the newest chosen location; a location other than the one loading,
+        // queued while a failure message of the loading location stands, replaces that message at
+        // once with the status naming the queued location (showNavMessage)
+        if (navState.locationLoading || (index !== appState.currentLocIndex && (navState.pictureMessage || navState.irMessage))) {
+            navState.locationLoading = `Loading the picture for ${appState.locations[index].Loc_name} ...`;
+        }
+        if (navState.locationLoading || navState.pictureMessage || navState.irMessage) showNavMessage();
         return;
     }
-    if (index === appState.currentLocIndex) return;
+    if (index === appState.currentLocIndex && !again) return;
     appState.isNavigating = true;
+    navState.panoramaShown = false; // until this location's own panorama is displayed
+    // a picture failure message belongs to its location: choosing another location clears it at
+    // once, with that location's response failure; that location's own response and panorama
+    // then write the message. While it loads no sky is shown, so a neutral status names the
+    // location being loaded until its panorama is shown or fails
+    if (index !== appState.currentLocIndex && (navState.pictureMessage || navState.locationLoading)) {
+        navState.pictureMessage = false;
+        navState.irMessage = false; // requestIR below starts this location's own request
+        navState.locationLoading = `Loading the picture for ${appState.locations[index].Loc_name} ...`;
+        showNavMessage();
+    }
 
     const targetLoc = appState.locations[index];
 
@@ -684,7 +813,8 @@ async function performLocationChange(index) {
     holdForResponse();
 
     // Parallel Load Phase:
-    // 1. Preload Image into Browser Cache (using new Image)
+    // 1. Load the panorama (new Image, in A-Frame's CORS mode): the loaded image itself becomes
+    // the sky's texture (prepareSkybox), so A-Frame makes no request of its own
     const imageLoad = loadImageAsync(targetLoc);
 
     // 2. Decode Audio (Background - Do NOT block visual transition)
@@ -694,35 +824,65 @@ async function performLocationChange(index) {
     // has stopped playback; a distance change during the load supersedes it)
     requestIR();
 
-    // Wait ONLY for Image
-    await imageLoad;
+    // The image is awaited inside prepareSkybox's wait (null when the preload failed), which a
+    // newer location ends at once
 
     // ATOMIC SWAP STRATEGY:
     // 1. Prepare Skybox (Load texture on hidden sphere)
-    await prepareSkybox(targetLoc);
+    // shown: this location's own panorama is ready; superseded: a newer location was chosen
+    // meanwhile (it runs next; this one is neither revealed, named, sounded nor reported)
+    const newerLocation = () => {
+        const queued = appState.pendingNavIndex;
+        return queued !== undefined && queued !== null && queued !== index;
+    };
+    const shown = !!(await prepareSkybox(targetLoc, imageLoad, newerLocation));
+    const superseded = newerLocation();
 
     // 2. Reset Camera to Initial Angle (WHILE hidden sphere is ready but not shown)
     // This blocks the user from seeing the rotation happen on the old or new image.
-    if (ui.camera) {
+    if (ui.camera && shown && !superseded) {
         const rotY = parseFloat(targetLoc.Photo_Rotation) || 0;
         // Convert to Radians for Three.js
         const rotRad = THREE.MathUtils.degToRad(rotY);
 
         // Reset A-Frame look-controls internal state if available
-        const lookControls = ui.camera.components['look-controls'];
+        // On a freshly opened page this location's panorama (made from the preloaded image) can be
+        // ready before A-Frame has initialised the camera's look-controls; skipping the start view
+        // then left it at yaw 0. Wait for look-controls (lookControlsReady) before the reveal; if it
+        // is still absent after the bound, apply the start view when it initialises, never skip it.
+        // A camera that has loaded without declaring look-controls (a custom camera entity) gets no
+        // start view and no wait, as before (lookControlsCanCome, checked again during the wait).
+        let lookControls = lookControlsNow(ui.camera);
+        if (!lookControls && lookControlsCanCome(ui.camera)) lookControls = await lookControlsReady(ui.camera, 10000);
         if (lookControls) {
+            startView.pending = null; // this location's start view replaces any deferred one
             lookControls.pitchObject.rotation.x = 0;
             lookControls.yawObject.rotation.y = rotRad; // Apply Initial Angle Here
+        } else if (lookControlsCanCome(ui.camera)) {
+            applyStartViewWhenReady(ui.camera, rotRad);
         }
     }
 
     // 3. Reveal Skybox (Instant Switch)
     // Now that camera is rotated, we show the new image.
-    revealSkybox();
+    // Reveal and name the location only with its own panorama; a failure hides both skies (no
+    // other location's picture under this location's name), stops and says so. A location queued
+    // meanwhile, also during the look-controls wait above, supersedes this one: checked again here.
+    const supersededNow = superseded || newerLocation();
+    if (shown && !supersededNow) {
+        revealSkybox();
+        navState.panoramaShown = true;
+        if (navState.pictureMessage || navState.locationLoading) {
+            navState.pictureMessage = false;
+            navState.locationLoading = false;
+            showNavMessage(); // a response failure stays shown
+        }
 
-
-    // 2. Update GUI Text
-    updateUI();
+        // 2. Update GUI Text
+        updateUI();
+    } else if (!supersededNow) {
+        showPanoramaFailure(targetLoc);
+    }
 
     // No restart here: settleNavigation (below, or the queued location change's own) restarts
     // once, when the newest location is shown and its response is in
@@ -772,32 +932,39 @@ async function loadCurrentIR() {
     const irData = loc.IRs ? loc.IRs[appState.currentIrIndex] : null;
     const irsPath = config?.data?.irsPath || 'assets/irs/';
     const url = irData ? `${irsPath}${irData.file}` : null;
-    // an older request's failure named the location or distance chosen before this request
-    showAudioMessage(null);
+    // an older request's failure named the location or distance chosen before this request (a
+    // picture failure message or a loading status stays)
+    if (navState.irMessage) {
+        navState.irMessage = false;
+        showNavMessage();
+    }
     // this request's generation: audio.loadIR numbers every call when it is made
     const request = audio.loadIR(url, irData ? irData.rotation : 0);
     const requestGen = audio.irGeneration;
     try {
         const applied = await request;
-        if (applied) showAudioMessage(null);
+        if (applied) { // a picture failure message or a loading status stays until the panorama is shown
+            navState.irMessage = false;
+            showNavMessage();
+        }
         return applied;
     } catch (e) {
         // a request that a newer one has replaced (also by a late rejection of the initialization
         // it waited for) changes nothing: not the buttons, the wish to listen or the message
         if (requestGen !== audio.irGeneration) return false;
         // another location is queued: the visitor has left this one, so its failure neither ends
-        // the wish to listen nor shows under the queued location; the failure (its message) is held
-        // and applies only if this location is chosen again (the queue in performLocationChange);
-        // the queued location's request clears it
+        // the wish to listen nor shows under the queued location (showNavMessage hides it); the stop
+        // is held and applies only if this location is chosen again (the queue in
+        // performLocationChange); the queued location's request clears it
         const queued = appState.pendingNavIndex;
-        const held = queued !== undefined && queued !== null && queued !== appState.currentLocIndex;
-        navState.irHeld = held ? irFailureMessage(loc, irData, e) : false;
-        if (!held) {
+        navState.irHeld = queued !== undefined && queued !== null && queued !== appState.currentLocIndex;
+        if (!navState.irHeld) {
             transportState.want = false;
             transportState.starting = 0;
             resetTransport();
-            showAudioMessage(irFailureMessage(loc, irData, e));
         }
+        navState.irMessage = irFailureMessage(loc, irData, e);
+        showNavMessage(); // while a picture failure stands, both reasons are shown
         throw e;
     }
 }
@@ -824,10 +991,48 @@ function irFailureMessage(loc, irData, e) {
 const transportState = { want: false, starting: 0, last: 0, resuming: null };
 
 // Navigation state: irGen counts the IR requests of location and distance changes, irSettled is the
-// newest one that has finished (applied or failed); irHeld: the message of a response failure of the
-// location being loaded that arrived while another location was queued (its stop and its message
-// are held), else false.
-const navState = { irGen: 0, irSettled: 0, irHeld: false };
+// newest one that has finished (applied or failed); panoramaShown: the current location's own
+// panorama is displayed (false during a location change and after its picture failed);
+// pictureMessage: the picture failure message while it stands (until the location's panorama is
+// shown or another location is chosen), else false; irMessage: the newest response request's
+// failure message (hidden when a newer request starts), else false; locationLoading: the neutral
+// status of a location chosen after a picture failure, until its panorama is shown or fails, else
+// false; irHeld: the response failure of the location being loaded arrived while another location
+// was queued (its stop is held), else false.
+const navState = { irGen: 0, irSettled: 0, panoramaShown: false, pictureMessage: false, irMessage: false, locationLoading: false, irHeld: false };
+
+// The message below the Start/Stop buttons from the navigation state: the standing picture and
+// response failure messages (both when both stand), else the neutral status of a location loading
+// after a picture failure, else none. While a location other than the one loading is queued, the
+// queued location is the chosen one: the loading location's failures are not shown under its name
+// (the queued location's change clears them; if the loading location is chosen again, they show
+// again).
+function showNavMessage() {
+    const queued = appState.pendingNavIndex;
+    const otherQueued = queued !== undefined && queued !== null && queued !== appState.currentLocIndex;
+    const failure = otherQueued ? '' : [navState.pictureMessage, navState.irMessage].filter(Boolean).join(' ');
+    if (failure) showAudioMessage(failure);
+    else showAudioMessage(navState.locationLoading || null, true);
+}
+
+// The current location's panorama could not be shown: no other location's picture stands under
+// its name (both skies hidden), nothing plays (as a failed response in loadCurrentIR), and a
+// message says so; Start loads the location again (handlePlay)
+function showPanoramaFailure(loc) {
+    ['sky', 'sky-buffer'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.setAttribute('visible', 'false');
+    });
+    updateUI();
+    transportState.want = false;
+    transportState.starting = 0;
+    audio.stop();
+    resetTransport();
+    navState.pictureMessage = `The picture for ${loc.Loc_name} could not be loaded, so nothing is shown or playing. ` +
+        'Press Start Audio to try again, or choose another location.';
+    navState.locationLoading = false; // this location's own outcome replaces its loading status
+    showNavMessage(); // this location's response failure, if any, stays shown with it
+}
 
 // A location or distance change: when the visitor wants sound, cancel what plays or is starting
 // (audio.stop makes a Start in flight stale) and show Loading until settleNavigation restarts.
@@ -853,11 +1058,12 @@ function requestIR() {
     loadCurrentIR().then(done, done);
 }
 
-// true while a location change runs, a queued location waits, or the newest location or distance
-// change's response is still loading
+// true while a location change runs (its panorama is not shown yet), the current location's
+// panorama is not displayed (it failed), a queued location waits, or the newest location or
+// distance change's response is still loading
 function navigationBusy() {
     const pending = appState.pendingNavIndex;
-    return appState.isNavigating || navState.irSettled !== navState.irGen ||
+    return appState.isNavigating || !navState.panoramaShown || navState.irSettled !== navState.irGen ||
         (pending !== undefined && pending !== null && pending !== appState.currentLocIndex);
 }
 
@@ -893,8 +1099,9 @@ function setTransport(state) {
     ui.stopBtn.disabled = state === 'stopped';
 }
 
-// Plain message right below the Start/Stop buttons (no alert() dialog); null hides it
-function showAudioMessage(text) {
+// Plain message right below the Start/Stop buttons (no alert() dialog); null hides it; neutral: a
+// status (role "status", plain text), not an alert
+function showAudioMessage(text, neutral) {
     let el = document.getElementById('audio-message');
     if (!text) {
         if (el) {
@@ -917,6 +1124,9 @@ function showAudioMessage(text) {
         else document.body.appendChild(el);
     }
     el.textContent = text;
+    el.setAttribute('role', neutral ? 'status' : 'alert');
+    el.style.color = neutral ? '' : '#ffd0c8';
+    el.style.fontWeight = neutral ? '' : '600';
     el.hidden = false;
 }
 
@@ -927,9 +1137,15 @@ function resetTransport() {
 
 // Start button: one Start at a time; a press while a Start is in flight is ignored. During a
 // navigation (navigationBusy) it only records the wish and shows Loading: settleNavigation then
-// starts once, with the newest location's and distance's response, never the old one.
+// starts once, with the newest location's and distance's response, never the old one. When the
+// current location's panorama is not displayed (it failed) and no location change runs, it loads
+// that location again, picture and response. With no locations it says so and stays stopped.
 async function handlePlay() {
     if (transportState.starting) return;
+    if (appState.locations.length === 0) {
+        showAudioMessage(`No locations are listed in ${config?.data?.csvPath || 'DataSet.csv'}, so there is nothing to play.`);
+        return;
+    }
     transportState.want = true;
     // the press itself resumes a suspended AudioContext (WebKit keeps a resume() made outside a
     // user gesture pending until the context runs); a Start held by a navigation is restarted later,
@@ -943,6 +1159,18 @@ async function handlePlay() {
             if (transportState.resuming === resuming) transportState.resuming = null;
             settleNavigation();
         });
+    }
+    if (!navState.panoramaShown && !appState.isNavigating && appState.currentLocIndex >= 0) {
+        setTransport('loading');
+        // the retry replaces the picture failure with the neutral status until the panorama is shown
+        // or fails again (loadCurrentIR hides an older response failure when the new request starts)
+        if (navState.pictureMessage) {
+            navState.pictureMessage = false;
+            navState.locationLoading = `Loading the picture for ${appState.locations[appState.currentLocIndex].Loc_name} ...`;
+            showNavMessage();
+        }
+        await performLocationChange(appState.currentLocIndex, true);
+        return;
     }
     if (navigationBusy()) {
         setTransport('loading');
