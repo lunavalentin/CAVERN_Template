@@ -94,8 +94,8 @@ async function initApp() {
         appState.currentLocIndex = -1;
 
         if (appState.locations.length > 0) {
-            let startIdx = appState.locations.findIndex(l => l.Loc_name === 'E5');
-            if (startIdx === -1) startIdx = 0;
+            // Start at the first location of DataSet.csv
+            const startIdx = 0;
             await performLocationChange(startIdx);
         } else {
             updateUI();
