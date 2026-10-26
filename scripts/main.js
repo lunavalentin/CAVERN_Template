@@ -700,8 +700,8 @@ async function performLocationChange(index) {
     preloadAdjacentAssets(index);
 }
 
-// map.js expects this function to verify/trigger IR usage when map changes location
-// map.js triggers this. We can delegate to our robust function.
+// Loads the location chosen in the location menu. map.js no longer calls it (a dot sets the menu
+// and fires its change event); kept for scripts that do.
 window.changeIr = async () => {
     const pendingId = ui.locSelect.value;
     const index = appState.locations.findIndex(l => l.Loc_name === pendingId);
