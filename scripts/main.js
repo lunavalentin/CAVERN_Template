@@ -406,9 +406,9 @@ function setupListeners() {
             // Wait slightly for audio graph cleanup if needed, but loadCurrentIR is async
             loadCurrentIR().then(() => {
                 handlePlay();
-            });
+            }, () => { }); // a failure is shown by loadCurrentIR
         } else {
-            loadCurrentIR();
+            loadCurrentIR().catch(() => { });
         }
     };
 
@@ -649,6 +649,7 @@ async function performLocationChange(index) {
     // We let this happen in parallel. If it finishes early, good. If late, audio updates when ready.
     // This restores the "Fast" feel of the visual transition.
     const irLoadPromise = loadCurrentIR();
+    irLoadPromise.catch(() => { }); // a failure is shown by loadCurrentIR
 
     // Wait ONLY for Image
     await imageLoad;
@@ -691,7 +692,7 @@ async function performLocationChange(index) {
         // This prevents playing with wrong IR.
         irLoadPromise.then(() => {
             handlePlay();
-        });
+        }, () => { });
     }
 
     document.body.style.cursor = 'default';
@@ -719,14 +720,43 @@ window.updateImage = () => {
 
 // --- Audio Engine Interactions ---
 
+// Returns audio.loadIR's result (true: applied; false: a newer request superseded it; null: no
+// location yet). A failure of the newest request (playback stopped, previous response cleared)
+// resets the Start/Stop buttons, shows a message below them and rethrows. A location without an
+// IR for the chosen distance is a failure too, never a silent keep of the previous response. A new
+// request hides an older request's message at once.
 async function loadCurrentIR() {
     const loc = appState.locations[appState.currentLocIndex];
-    if (!loc || !loc.IRs[appState.currentIrIndex]) return;
+    if (!loc) return null;
 
-    const irData = loc.IRs[appState.currentIrIndex];
+    const irData = loc.IRs ? loc.IRs[appState.currentIrIndex] : null;
     const irsPath = config?.data?.irsPath || 'assets/irs/';
-    const url = `${irsPath}${irData.file}`;
-    await audio.loadIR(url, irData.rotation);
+    const url = irData ? `${irsPath}${irData.file}` : null;
+    // an older request's failure named the location or distance chosen before this request
+    showAudioMessage(null);
+    try {
+        const applied = await audio.loadIR(url, irData ? irData.rotation : 0);
+        if (applied) showAudioMessage(null);
+        return applied;
+    } catch (e) {
+        setAudioLoading(false);
+        ui.stopBtn.disabled = true;
+        showAudioMessage(irFailureMessage(loc, irData));
+        throw e;
+    }
+}
+
+// The message for a response that could not be applied. A location without an IR (a picture-only
+// location) is told so, without an offer to try again.
+function irFailureMessage(loc, irData) {
+    if (!irData) {
+        if (loc.IRs && loc.IRs.length) {
+            return `The chosen distance is not listed for ${loc.Loc_name}, so nothing is playing. Choose another distance.`;
+        }
+        return `No acoustic response (IR) is listed for ${loc.Loc_name} in ${config?.data?.csvPath || 'DataSet.csv'}, so nothing plays here.`;
+    }
+    return `The acoustic response for ${loc.Loc_name} (${irData.label || irData.file}) could not be loaded, so nothing is playing. ` +
+        'Press Start Audio to try again, or choose another location or distance.';
 }
 
 // --- UI Helpers ---
@@ -740,6 +770,33 @@ function setAudioLoading(isLoading) {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-play-fill me-1"></i> Start Audio';
     }
+}
+
+// Plain message right below the Start/Stop buttons (no alert() dialog); null hides it
+function showAudioMessage(text) {
+    let el = document.getElementById('audio-message');
+    if (!text) {
+        if (el) {
+            el.hidden = true;
+            el.textContent = '';
+        }
+        return;
+    }
+    if (!el) {
+        el = document.createElement('p');
+        el.id = 'audio-message';
+        el.setAttribute('role', 'alert');
+        el.style.fontSize = '0.8rem';
+        el.style.lineHeight = '1.35';
+        el.style.margin = '0 0 12px';
+        el.style.color = '#ffd0c8';
+        el.style.fontWeight = '600';
+        const row = ui.playBtn && ui.playBtn.parentElement;
+        if (row && row.parentElement) row.parentElement.insertBefore(el, row.nextSibling);
+        else document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.hidden = false;
 }
 
 async function handlePlay() {

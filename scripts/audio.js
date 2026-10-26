@@ -179,61 +179,82 @@ class AudioEngine {
         return null;
     }
 
+    // Every call is a new request (generation number). Only the newest request may set the buffer
+    // and rotation: an older, slower completion is discarded (its decoded buffer stays cached for its
+    // own URL). Returns true when applied, false when a newer request superseded it. A failed or
+    // missing load of the newest request throws (see failIR): the previous location's response is
+    // never kept under the new label.
     async loadIR(url, rotationDegrees) {
+        const gen = this.irGeneration = (this.irGeneration || 0) + 1;
         if (!this.ctx) await this.init();
+        if (gen !== this.irGeneration) return false;
+        if (!url) return this.failIR(url, new Error('no impulse response for this location and distance'));
 
-        // Prevent trying to load if url is missing
-        if (!url) {
-            console.warn("⚠️ No IR URL provided, skipping load.");
-            return;
-        }
-
-        // Check Cache first
-        if (this.irCache.has(url)) {
-            // console.log(`⚡ Using cached IR: ${url.split('/').pop()}`);
-            this.currentIrBuffer = this.irCache.get(url);
-
-            // Set rotation offset for the IR if needed
-            this.irRotationOffset = rotationDegrees || 0;
-
-            // If already playing, we need to update the convolver
-            if (this.isPlaying && this.sourceNode) {
-                this.setupConvolver();
-            }
-            return;
-        }
-
-        console.log(`📥 Loading IR: ${url}`);
-
-        try {
-            const response = await fetch(url);
-            if (!response.ok) {
-                // Determine if 404
-                if (response.status === 404) {
-                    console.warn(`⚠️ IR file not found: ${url}. Switching to DRY mode fallback.`);
-                    return;
+        let buffer = this.irCache.get(url);
+        if (!buffer) {
+            console.log(`📥 Loading IR: ${url}`);
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}${response.statusText ? ' ' + response.statusText : ''}`);
                 }
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                const arrayBuffer = await response.arrayBuffer();
+                const fileRate = this.wavSampleRate(arrayBuffer);
+                buffer = this.normaliseIrRate(await this.ctx.decodeAudioData(arrayBuffer), fileRate);
+                this.irCache.set(url, buffer);
+            } catch (e) {
+                if (gen !== this.irGeneration) return false; // an obsolete failure changes nothing
+                return this.failIR(url, e);
             }
-            const arrayBuffer = await response.arrayBuffer();
-            const fileRate = this.wavSampleRate(arrayBuffer);
-            const decodedBuffer = this.normaliseIrRate(await this.ctx.decodeAudioData(arrayBuffer), fileRate);
-
-            // Cache it!
-            this.irCache.set(url, decodedBuffer);
-            this.currentIrBuffer = decodedBuffer;
-
-            // Set rotation offset for the IR if needed
-            this.irRotationOffset = rotationDegrees || 0;
-
-            // If already playing, we need to update the convolver
-            if (this.isPlaying && this.sourceNode) {
-                this.setupConvolver();
+            if (gen !== this.irGeneration) {
+                console.log(`↩️ IR discarded, a newer request superseded it: ${url.split('/').pop()}`);
+                return false;
             }
+        }
 
-            console.log(`✅ IR Loaded & Cached: ${url.split('/').pop()}`);
-        } catch (e) {
-            console.error(`❌ Failed to load IR from ${url}:`, e);
+        this.currentIrBuffer = buffer;
+        this.currentIrUrl = url;
+        this.irRotationOffset = rotationDegrees || 0;
+        this.irAppliedGeneration = gen;
+
+        // If already playing, we need to update the convolver
+        if (this.isPlaying && this.sourceNode) {
+            this.setupConvolver();
+        }
+        console.log(`✅ IR ready: ${url.split('/').pop()}`);
+        return true;
+    }
+
+    // A failed IR load: stop playback, drop the previous response and its rotation, and throw an
+    // error that names the file (main.js shows a message near the controls).
+    failIR(url, cause) {
+        this.stopSource();
+        this.teardownConvolver();
+        this.currentIrBuffer = null;
+        this.currentIrUrl = null;
+        this.irRotationOffset = 0;
+        const name = url ? String(url).split('/').pop() : '(none)';
+        const why = cause && cause.message ? cause.message : String(cause);
+        console.error(`❌ Failed to load IR ${name}:`, cause);
+        const err = new Error(`Impulse response not loaded: ${name} (${why})`);
+        err.name = 'IrLoadError';
+        err.irUrl = url || null;
+        throw err;
+    }
+
+    // Disconnect the per-channel convolvers and their input node
+    teardownConvolver() {
+        if (this.foaConvolvers) {
+            this.foaConvolvers.forEach(c => c.disconnect());
+            this.foaConvolvers = null;
+        }
+        if (this.foaOut) {
+            this.foaOut.disconnect();
+            this.foaOut = null;
+        }
+        if (this.convolverNode) {
+            this.convolverNode.disconnect();
+            this.convolverNode = null;
         }
     }
 
