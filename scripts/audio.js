@@ -142,6 +142,43 @@ class AudioEngine {
         this.gainNode.gain.setTargetAtTime(gain, t, rampTime);
     }
 
+    // Scale a decoded IR by (IR file rate / buffer rate). decodeAudioData resamples the IR to the
+    // context rate and the convolvers run with normalize = false, so the convolution sum, and the
+    // level, would otherwise grow with the device's rate (+0.74 dB at 48 kHz, +6.76 dB at 96 kHz for
+    // a 44.1 kHz IR). fileRate is the rate in the file's WAV header (wavSampleRate); when it cannot
+    // be read, config.audio.irSampleRate is used; with neither, the IR is not scaled.
+    normaliseIrRate(buffer, fileRate) {
+        let native = Number(fileRate);
+        if (!Number.isFinite(native) || native <= 0) {
+            const a = window.config && window.config.audio;
+            native = a ? Number(a.irSampleRate) : NaN;
+        }
+        if (!Number.isFinite(native) || native <= 0 || buffer.sampleRate === native) return buffer;
+        const k = native / buffer.sampleRate;
+        for (let c = 0; c < buffer.numberOfChannels; c++) {
+            const d = buffer.getChannelData(c);
+            for (let i = 0; i < d.length; i++) d[i] *= k;
+        }
+        return buffer;
+    }
+
+    // The sample rate in a RIFF/WAVE header (the 'fmt ' chunk, also after other chunks and for
+    // WAVE_FORMAT_EXTENSIBLE), or null for any other data. Read before decodeAudioData, which
+    // detaches the ArrayBuffer.
+    wavSampleRate(arrayBuffer) {
+        try {
+            const v = new DataView(arrayBuffer);
+            const tag = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+            if (v.byteLength < 12 || tag(0) !== 'RIFF' || tag(8) !== 'WAVE') return null;
+            for (let o = 12; o + 8 <= v.byteLength;) {
+                const size = v.getUint32(o + 4, true);
+                if (tag(o) === 'fmt ') return o + 16 <= v.byteLength ? (v.getUint32(o + 12, true) || null) : null;
+                o += 8 + size + (size % 2);
+            }
+        } catch (e) { }
+        return null;
+    }
+
     async loadIR(url, rotationDegrees) {
         if (!this.ctx) await this.init();
 
@@ -179,7 +216,8 @@ class AudioEngine {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             const arrayBuffer = await response.arrayBuffer();
-            const decodedBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+            const fileRate = this.wavSampleRate(arrayBuffer);
+            const decodedBuffer = this.normaliseIrRate(await this.ctx.decodeAudioData(arrayBuffer), fileRate);
 
             // Cache it!
             this.irCache.set(url, decodedBuffer);
@@ -208,7 +246,8 @@ class AudioEngine {
             const response = await fetch(url);
             if (response.ok) {
                 const arrayBuffer = await response.arrayBuffer();
-                const decodedBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+                const fileRate = this.wavSampleRate(arrayBuffer);
+                const decodedBuffer = this.normaliseIrRate(await this.ctx.decodeAudioData(arrayBuffer), fileRate);
                 this.irCache.set(url, decodedBuffer);
             }
         } catch (e) {

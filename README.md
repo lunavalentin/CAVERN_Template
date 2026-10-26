@@ -40,7 +40,7 @@ Open `config.json` in a text editor. Here’s what each section means:
 * `project`: Set your project’s name, subtitle, and about link.
 * `map`: Path to your map image and real-world bounds (for correct dot placement).
 * `data`: Paths to your location data and asset folders.
-* `audio`: Ambisonic order, default volume, and sample list.
+* `audio`: Ambisonic order, default volume, and sample list. Optional: `irSampleRate`, the sample rate of your IR files, needed only for IRs that are not WAV files (the rate of a WAV file is read from its header). Each IR is scaled by its own rate over the device's audio rate, which compensates the convolution gain for the playback sample rate.
 
 ---
 
