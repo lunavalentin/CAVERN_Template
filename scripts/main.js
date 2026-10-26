@@ -113,9 +113,8 @@ async function initApp() {
 
 
 
-        // 5c. Start Background Loader for other scenes
-        const bgLoader = new BackgroundLoader(appState.locations);
-        bgLoader.start();
+        // 5c. No start-up preload of every panorama (only the neighbours, after each location
+        // change: preloadAdjacentAssets)
 
         // 5d. Register Service Worker
         registerServiceWorker();
@@ -480,6 +479,7 @@ function loadImageAsync(loc) {
         const url = `${imagesPath}${loc.Photo_Name}`;
 
         const img = new Image();
+        img.crossOrigin = 'anonymous'; // the request mode of A-Frame's texture load, so its request can reuse this one
         img.onload = () => {
             console.log(`🖼️ Image preloaded: ${loc.Photo_Name}`);
             resolve(url);
@@ -493,8 +493,15 @@ function loadImageAsync(loc) {
 }
 
 function preloadAdjacentAssets(currentIndex) {
-    // Legacy strategy populates ALL assets at start. 
-    // We don't need manual preloading anymore.
+    // preload only the previous and next locations' panoramas, after a short pause
+    const n = appState.locations.length;
+    if (n < 2) return;
+    setTimeout(() => {
+        [currentIndex + 1, currentIndex - 1].forEach((i) => {
+            const loc = appState.locations[(i + n) % n];
+            if (loc) loadImageAsync(loc);
+        });
+    }, 1500);
 }
 
 
@@ -960,60 +967,5 @@ function registerServiceWorker() {
                 console.log('SW registration failed: ', registrationError);
             });
         });
-    }
-}
-
-// --- Background Loader ---
-
-class BackgroundLoader {
-    constructor(locations) {
-        this.locations = locations;
-        this.queue = [...locations]; // Copy
-        // Remove current location (first one) if strictly needed, but browser cache handles duplicates
-        this.total = this.queue.length;
-        this.loadedCount = 0;
-        this.isRunning = false;
-
-        this.progressBar = document.getElementById('progress-bar');
-        this.progressContainer = document.getElementById('progress-container');
-    }
-
-    start() {
-        if (this.isRunning) return;
-        this.isRunning = true;
-        console.log("Starting Background Loader...");
-        this.processQueue();
-    }
-
-    async processQueue() {
-        if (this.queue.length === 0) {
-            console.log("Background Loading Complete!");
-            if (this.progressContainer) {
-                setTimeout(() => {
-                    this.progressContainer.style.opacity = '0';
-                }, 1000);
-            }
-            this.isRunning = false;
-            return;
-        }
-
-        const loc = this.queue.shift();
-
-        // Load Image
-        await loadImageAsync(loc);
-
-        // Update Progress
-        this.loadedCount++;
-        this.updateUI();
-
-        // Small delay to yield to main thread/render
-        setTimeout(() => this.processQueue(), 50);
-    }
-
-    updateUI() {
-        if (this.progressBar && this.total > 0) {
-            const pct = (this.loadedCount / this.total) * 100;
-            this.progressBar.style.width = `${pct}%`;
-        }
     }
 }

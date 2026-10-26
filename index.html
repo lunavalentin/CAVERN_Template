@@ -326,24 +326,6 @@
             letter-spacing: 1px;
         }
 
-        .progress-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 4px;
-            background: rgba(255, 255, 255, 0.1);
-            z-index: 2000;
-        }
-
-        .progress-bar {
-            height: 100%;
-            background: var(--accent);
-            width: 0%;
-            transition: width 0.3s ease;
-            box-shadow: 0 0 10px var(--accent);
-        }
-
         /* Nothing in the UI layer widens the page: on a phone the collapsed panel (moved off to the
            right) made the layout viewport wider than the screen */
         #ui-layer {
@@ -420,9 +402,6 @@
 
 <body>
 
-    <div class="progress-container" id="progress-container">
-        <div class="progress-bar" id="progress-bar"></div>
-    </div>
     <!-- Loading Overlay -->
     <div id="loading-overlay">
         <div class="spinner"></div>
