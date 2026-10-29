@@ -116,9 +116,9 @@ Created by Luna Leila Valentin & Celeste Betancur Gutierrez.
 
 This repository contains the CAVERN template, a framework developed for research-creation, immersive audio-visual presentation, and artistic experimentation. The template is shared to support learning, adaptation, and academic or creative use.
 
-You are welcome to use and modify this template for non-commercial projects, including research, teaching, installations, and artistic work. If you build upon it, please credit the authors.
+You are welcome to use, modify and publish this template for non-commercial projects, including research, teaching, installations and artistic work. This includes hosting your own tour built on it, for example on GitHub Pages; you do not need to ask us. Please credit it as "CAVERN Template by Luna Leila Valentin and Celeste Betancur Gutierrez" with a link to this repository.
 
-Commercial use of this template or derivative systems requires prior permission from the authors. See the LICENSE file for details.
+Commercial use of this template or of works built on it requires prior written permission from the authors. Your own panoramas, impulse responses and data are not covered by this license. See the LICENSE file for details.
 
 ---
 
