@@ -17,8 +17,8 @@
         worker-src 'self' blob:;
     ">
 
-    <!-- A-Frame - Load async with error handling -->
-    <script src="https://aframe.io/releases/1.4.2/aframe.min.js" crossorigin="anonymous" async
+    <!-- A-Frame - Load without async (with error handling): an async load can run after <a-scene> is parsed and fail -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js" crossorigin="anonymous"
         onerror="console.error('Failed to load A-Frame')"></script>
 
     <!-- p5.js (For Map) - Async loading -->
@@ -41,8 +41,9 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
         onerror="console.warn('Failed to load Bootstrap Icons')">
 
-    <!-- JSAmbisonics - Load with error handling -->
-    <script src="./JSAmbisonics/ambisonics.umd.js" onerror="console.error('Failed to load JSAmbisonics')"></script>
+    <!-- JSAmbisonics - Deferred (with error handling): the page is parsed and painted while it loads;
+         deferred scripts run in document order, so it still runs before the app scripts below -->
+    <script src="./JSAmbisonics/ambisonics.umd.js" defer onerror="console.error('Failed to load JSAmbisonics')"></script>
 
     <!-- App Scripts - Deferred for non-blocking load -->
     <script src="./scripts/audio.js" defer onerror="console.error('Failed to load audio.js')"></script>
@@ -325,31 +326,82 @@
             letter-spacing: 1px;
         }
 
-        .progress-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 4px;
-            background: rgba(255, 255, 255, 0.1);
-            z-index: 2000;
+        /* Nothing in the UI layer widens the page: on a phone the collapsed panel (moved off to the
+           right) made the layout viewport wider than the screen */
+        #ui-layer {
+            overflow: hidden;
         }
 
-        .progress-bar {
-            height: 100%;
-            background: var(--accent);
-            width: 0%;
-            transition: width 0.3s ease;
-            box-shadow: 0 0 10px var(--accent);
+        /* A long location label is cut with an ellipsis instead of widening the bar */
+        .location-display {
+            max-width: 32vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        @media (max-width: 767.98px) {
+            /* Phones: the top bar wraps into two rows (title and buttons, then Previous / location /
+               Next) instead of widening the page, and the panel starts below it */
+            .top-bar {
+                flex-wrap: wrap;
+                row-gap: 4px;
+                padding: 6px 10px;
+                column-gap: 6px;
+            }
+
+            .app-title {
+                font-size: 1.1rem;
+                letter-spacing: 0.5px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .top-bar > .d-flex:first-child {
+                order: 1;
+                flex: 1 1 auto;
+                min-width: 0;
+            }
+
+            .top-bar > .d-flex.gap-2 {
+                order: 2;
+            }
+
+            .nav-controls {
+                order: 3;
+                flex: 1 1 100%;
+                min-width: 0;
+                gap: 6px;
+                justify-content: space-between;
+            }
+
+            .location-display {
+                flex: 1 1 auto;
+                min-width: 0;
+                max-width: none;
+                font-size: 0.78rem;
+                letter-spacing: 0;
+                text-transform: none;
+            }
+
+            .btn-glass {
+                padding: 5px 10px;
+            }
+
+            .sidebar {
+                top: 99px;
+                left: 10px;
+                right: 10px;
+                width: auto;
+                max-height: calc(100% - 139px);
+            }
         }
     </style>
 </head>
 
 <body>
 
-    <div class="progress-container" id="progress-container">
-        <div class="progress-bar" id="progress-bar"></div>
-    </div>
     <!-- Loading Overlay -->
     <div id="loading-overlay">
         <div class="spinner"></div>
@@ -364,7 +416,8 @@
         <a-sky id="sky" color="#FFFFFF" material="shader: flat;"></a-sky>
         <a-sky id="sky-buffer" color="#FFFFFF" material="shader: flat;" visible="false"></a-sky>
 
-        <a-camera id="cameraVR" position="0 1.6 0" look-controls="reverseMouseDrag: true"></a-camera>
+        <!-- wasd-controls off: in a 360-degree picture the keys must not move the camera inside the sphere -->
+        <a-camera id="cameraVR" position="0 1.6 0" look-controls="reverseMouseDrag: true; magicWindowTrackingEnabled: false" wasd-controls="enabled: false"></a-camera>
     </a-scene>
 
     <!-- UI Overlay -->
@@ -374,8 +427,7 @@
         <div class="top-bar pointer-events-auto">
             <div class="d-flex align-items-center">
                 <h1 id="app-title" class="app-title me-3">CAVERN</h1>
-                <span id="app-subtitle" class="text-white-50 small d-none d-md-block">Chauvet Cave · Archaeoacoustics
-                    Research</span>
+                <span id="app-subtitle" class="text-white-50 small d-none d-md-block"></span>
             </div>
 
             <div class="nav-controls">

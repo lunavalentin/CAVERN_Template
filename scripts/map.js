@@ -24,6 +24,65 @@ let ymin = 6366452.372;
 let ymax = 6366688.656;
 let w, h;
 
+// Map bounds come from config.json (map.bounds). The values above are only used until
+// window.config is available. The canvas aspect ratio (height / width) follows the bounds.
+function applyConfigBounds() {
+    const b = window.config && window.config.map && window.config.map.bounds;
+    if (!b) return;
+    const v = [b.xmin, b.xmax, b.ymin, b.ymax].map(Number);
+    if (v.every(Number.isFinite) && v[1] > v[0] && v[3] > v[2]) {
+        xmin = v[0]; xmax = v[1]; ymin = v[2]; ymax = v[3];
+    }
+}
+
+function mapAspect() {
+    applyConfigBounds();
+    return (ymax - ymin) / (xmax - xmin);
+}
+
+// Dot sizes in canvas pixels, from the canvas width with pixel minimums: fractions of the height
+// made tiny dots on a wide map, and the hit size stays usable with a finger.
+function mapDotSizes() {
+    const ww = w || 300;
+    return { dot: Math.max(10, ww * 0.032), selected: Math.max(13, ww * 0.044),
+        ring: Math.max(22, ww * 0.075), hit: Math.max(12, ww * 0.045) };
+}
+
+// The location whose dot is nearest to (mx, my) within the hit radius, or null.
+function mapKeyAt(mx, my) {
+    if (!(mx >= 0 && my >= 0 && mx <= w && my <= h) || !window.json) return null;
+    const r = mapDotSizes().hit;
+    let best = null, bestD = Infinity;
+    for (const [key, value] of window.json.entries()) {
+        if (value.x_abs === undefined) continue;
+        const px = (value.x_abs - xmin) / (xmax - xmin) * w;
+        const py = (ymax - value.y_abs) / (ymax - ymin) * h;
+        const d = Math.hypot(mx - px, my - py);
+        if (d <= r && d < bestD) { best = key; bestD = d; }
+    }
+    return best;
+}
+
+function selectMapLocation(key) {
+    if (!key || key === window.currentValue || !locationElemnt) return;
+    window.currentValue = key;
+    locationElemnt.value = key;
+    locationElemnt.dispatchEvent(new Event('change'));
+}
+
+// Selection on release (p5 calls these for mouse and, without touch handlers, for touch too): a
+// location is chosen when the press is released on the same dot. Polling mouseIsPressed in draw()
+// missed a click or tap released within one frame.
+let mapPressKey = null;
+function mousePressed() {
+    mapPressKey = mapKeyAt(mouseX, mouseY);
+}
+function mouseReleased() {
+    const k = mapKeyAt(mouseX, mouseY);
+    if (k && k === mapPressKey) selectMapLocation(k);
+    mapPressKey = null;
+}
+
 var mouseToLocation = '';
 let newLocation = '';
 
@@ -68,7 +127,7 @@ function setup() {
     } else {
         w = 300; // Fallback
     }
-    h = w * 2.2175; // aspect ratio
+    h = w * mapAspect(); // aspect ratio from the map bounds
     canvas = createCanvas(w, h);
     canvas.parent("mapContainer");
 
@@ -83,7 +142,8 @@ function draw() {
     // Or just rely on sidebar transitions triggering explicit resize calls.
     // For now, let's just ensure it matches container width
     let container = document.getElementById("mapContainer");
-    if (container && Math.abs(container.clientWidth - w) > 1) {
+    // Also resize when the bounds (and so the aspect ratio) arrive after setup()
+    if (container && (Math.abs(container.clientWidth - w) > 1 || Math.abs(container.clientWidth * mapAspect() - h) > 1)) {
         resizeMapCanvas();
     }
 
@@ -129,21 +189,24 @@ function draw() {
             let px = (x - xmin) / (xmax - xmin) * w
             let py = (ymax - y) / (ymax - ymin) * h;
 
-            // Always interactive
-            navigateMap(px, py, h * 0.02, key);
+            // Always interactive (hover); sizes from the canvas width with pixel minimums
+            const ds = mapDotSizes();
+            navigateMap(px, py, ds.hit, key);
 
             noStroke();
             if (key === window.currentValue) {
                 fill(224, 192, 151); // --accent color #E0C097
-                circle(px, py, h * 0.03);
+                circle(px, py, ds.selected);
                 // Ring
                 noFill();
                 stroke(224, 192, 151);
                 strokeWeight(2);
-                circle(px, py, h * 0.05);
+                circle(px, py, ds.ring);
             } else {
-                fill(255, 255, 255, 150);
-                circle(px, py, h * 0.015);
+                fill(255, 255, 255, 190);
+                stroke(20, 20, 20, 200);
+                strokeWeight(1);
+                circle(px, py, ds.dot);
             }
         }
     }
@@ -175,8 +238,8 @@ function resizeMapCanvas() {
     let container = document.getElementById("mapContainer");
     if (container) {
         w = container.clientWidth;
-        // Keep aspect ratio
-        h = w * 2.2175;
+        // Keep aspect ratio (from the map bounds)
+        h = w * mapAspect();
         resizeCanvas(w, h, true); // true = no redraw immediatly
     }
 }
@@ -187,27 +250,7 @@ function navigateMap(px, py, r, key) {
 
         // Change cursor to pointer
         cursor(HAND);
-
-        if (mouseIsPressed) {
-            newLocation = mouseToLocation;
-            if (newLocation !== '' && newLocation !== window.currentValue) {
-
-                if (locationElemnt) {
-                    locationElemnt.value = window.currentValue; // Use explicit window global
-
-                    // Update global
-                    window.currentValue = newLocation;
-                    locationElemnt.value = window.currentValue;
-
-                    // Trigger change event manually because setting .value doesn't fire it
-                    locationElemnt.dispatchEvent(new Event('change'));
-                }
-
-                // Call global functions if they exist (compatibility)
-                if (typeof changeIr === 'function') changeIr();
-                if (typeof updateImage === 'function') updateImage();
-            }
-        }
+        // A location is selected on release, in mouseReleased()
     } else {
         // cursor(ARROW); 
     }
