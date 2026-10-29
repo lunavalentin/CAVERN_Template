@@ -672,14 +672,24 @@ class AudioEngine {
     // microphone's tracks are stopped (finishRelease), so no old tail can sound later. A source
     // started or a mode switch made meanwhile does not touch these gains (the new source has its
     // own gains and convolvers). A playing source is not cut otherwise.
-    stop() {
+    // With ringOut (the visitor's Stop), only the dry path and the convolvers' input fade: the
+    // reverberation already in the convolvers rings out for the IR's length, as it would in the
+    // room, and the microphone is released at the end of the input fade. A later stop() without
+    // ringOut (a location change, a failure) fades a tail that still rings, so no tail sounds
+    // under another location.
+    stop({ ringOut = false } = {}) {
         this.cancelStart(); // a Start in flight is cancelled too: its source never connects
+        if (!ringOut) this.cutRingingTails();
         const source = this.sourceNode;
-        const voice = [this.voiceDry, this.voiceWet].filter(Boolean);
+        const input = this.convolverNode;
+        const ringing = ringOut && !!input && !!this.voiceWet;
+        const voice = ringing ? [this.voiceDry, input].filter(Boolean) : [this.voiceDry, this.voiceWet].filter(Boolean);
+        const tail = ringing && this.foaConvolvers && this.foaConvolvers.length ? this.foaConvolvers[0].buffer.duration : 0;
         const release = {
             nodes: [source, this.convolverNode, this.foaOut, ...(this.foaConvolvers || []),
-                this.voiceDryMode, this.voiceWetMode, ...voice].filter(Boolean),
-            stream: this.micStream
+                this.voiceDryMode, this.voiceWetMode, this.voiceDry, this.voiceWet].filter(Boolean),
+            stream: this.micStream,
+            wet: ringing ? this.voiceWet : null
         };
         this.sourceNode = null;
         this.convolverNode = null;
@@ -711,16 +721,39 @@ class AudioEngine {
                 source.stop(end);
             } catch (e) { } // ignore if already stopped
         }
+        if (ringing && release.stream) {
+            const stream = release.stream;
+            release.stream = null;
+            setTimeout(() => {
+                stream.getTracks().forEach(track => track.stop());
+                console.log("Mic stream stopped");
+            }, 50);
+        }
         // The release ends by the context's clock, not the wall clock: an output that renders in
-        // long periods renders the ramp later. It ends at once when the context does not run
-        // (nothing is rendered), and after at most 1 s in any case.
-        const until = Date.now() + 1000;
+        // long periods renders the ramp (and a ringing tail) later. It ends at once when the context
+        // does not run (nothing is rendered), and after at most 1 s past the tail in any case.
+        release.endAt = end + tail;
+        const until = Date.now() + 1000 * (1 + tail);
         const check = () => {
-            const rendered = ctx.state !== 'running' || ctx.currentTime >= end + 128 / ctx.sampleRate;
+            const rendered = ctx.state !== 'running' || ctx.currentTime >= release.endAt + 128 / ctx.sampleRate;
             if (rendered || Date.now() > until) this.finishRelease(release);
             else release.timer = setTimeout(check, 10);
         };
         release.timer = setTimeout(check, 30);
+    }
+
+    // A tail left ringing by a Stop fades in 25 ms and its release then ends
+    cutRingingTails() {
+        if (!this.releases || !this.ctx) return;
+        const t = this.ctx.currentTime;
+        this.releases.forEach(release => {
+            if (!release.wet) return;
+            release.wet.gain.cancelScheduledValues(t);
+            release.wet.gain.setValueAtTime(release.wet.gain.value, t);
+            release.wet.gain.linearRampToValueAtTime(0, t + 0.025);
+            release.wet = null;
+            release.endAt = Math.min(release.endAt, t + 0.025);
+        });
     }
 
     // The end of a release: the stopped source, its convolvers and its gains are disconnected, their

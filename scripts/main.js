@@ -413,8 +413,8 @@ function setupListeners() {
         radio.onchange = (e) => {
             if (e.target.checked) {
                 // A new source type: before the label changes, a Start in flight is cancelled and what
-                // plays is stopped (handleStop, audio.stop: its output fades out in 25 ms); a
-                // microphone's tracks are released at the end of that fade. An explicit Start resumes
+                // plays is stopped (handleStop, audio.stop: its input fades out in 25 ms and its reverberation
+                // rings out); a microphone's tracks are released at the end of that fade. An explicit Start resumes
                 const type = e.target.id.replace('src-', '');
                 if (type !== appState.currentSourceType) handleStop();
                 appState.currentSourceType = type;
@@ -1036,8 +1036,10 @@ function showPanoramaFailure(loc) {
 
 // A location or distance change: when the visitor wants sound, cancel what plays or is starting
 // (audio.stop makes a Start in flight stale) and show Loading until settleNavigation restarts.
+// A tail still ringing after Stop is faded, so it does not sound under the next location.
 // Returns whether the visitor wants sound.
 function holdForResponse() {
+    audio.cutRingingTails();
     if (!transportState.want) return false;
     transportState.starting = 0;
     audio.stop();
@@ -1240,11 +1242,11 @@ async function startPlayback() {
 }
 
 // Stop also cancels a Start in flight, a held restart and a Start pressed during a navigation; it
-// stops every source and releases every microphone track (audio.stop)
+// stops every source and releases every microphone track (audio.stop); the reverberation rings out
 function handleStop() {
     transportState.want = false;
     transportState.starting = 0;
-    audio.stop();
+    audio.stop({ ringOut: true });
     setTransport('stopped');
 }
 

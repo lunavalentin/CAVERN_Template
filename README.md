@@ -59,7 +59,7 @@ Open `DataSet.csv` in Excel or a text editor. Each row is a location (spot) on y
 **Audio Columns (Impulse Responses):**
 You can add multiple impulse responses per location (for different distances or conditions):
 * `IR_Name_1`: Filename of the first IR (e.g., `spot1_colocated.wav`).
-* `IR_Rotation_1`: Rotation offset for the IR (if needed).
+* `IR_Rotation_1`: Rotation offset for the IR (if needed). Since October 2026 the sound field turns with the picture (the yaw sign was inverted before), so offsets tuned with an earlier version of the template need to be checked again.
 * `IR_Label_1`: Text shown in the dropdown (e.g., "Co-location").
 Repeat for `_2`, `_3`, etc. to add more IRs.
 
